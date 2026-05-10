@@ -19,6 +19,10 @@ if __name__ == "__main__":
     else:
         dataset = atlas.AtlasDataset(identifier="hivemind/tweets-from-members-of-us-congress-from-all-time-updated-2024-12-05-3")
         tweets_df = dataset.maps[0].data.df
+        tweets_df = tweets_df.rename({"tweetId": "tweet_id", "postedAt": "posted_at", "twitter_lower": "twitter"}, axis=1)
+        tweets_df["name"] = tweets_df["name"].str.replace(r"([A-Z]-[A-Z][A-Z])", "", regex=True)
+        tweets_df = tweets_df.drop(["state", "party", "chamber", "years", "source", "id"], axis=1)
+
         tweets_df.to_csv("data/tweets.csv", index=False)
         print(f"Saved data/tweets.csv with {tweets_df.shape[0]} rows, columns: {list(tweets_df.columns)}")
 
@@ -146,18 +150,18 @@ if __name__ == "__main__":
 
         # social media
         social_media_df_1 = pd.json_normalize(pd.read_json("https://unitedstates.github.io/congress-legislators/legislators-social-media.json").to_dict(orient="records"))
-        social_media_df_1["twitter_lower"] = social_media_df_1["social.twitter"].str.lower()
+        social_media_df_1["twitter"] = social_media_df_1["social.twitter"].str.lower()
 
         social_media_df_2 = pd.read_json("https://raw.githubusercontent.com/alexlitel/congresstweets-automator/refs/heads/master/data/historical-users-filtered.json")
         social_media_df_2 = social_media_df_2.explode("accounts").rename({"accounts": "account"}, axis=1).reset_index(drop=True).to_dict(orient="records")
         social_media_df_2 = pd.json_normalize(social_media_df_2)
-        social_media_df_2["twitter_lower"] = social_media_df_2["account.screen_name"].str.lower()
+        social_media_df_2["twitter"] = social_media_df_2["account.screen_name"].str.lower()
 
-        social_media_df = pd.concat([social_media_df_1[["id.bioguide", "twitter_lower"]], social_media_df_2[["id.bioguide", "twitter_lower"]]]).dropna().drop_duplicates()
+        social_media_df = pd.concat([social_media_df_1[["id.bioguide", "twitter"]], social_media_df_2[["id.bioguide", "twitter"]]]).dropna().drop_duplicates()
 
         tweets_df = pd.read_csv("data/tweets.csv")
-        social_media_df = social_media_df[social_media_df["twitter_lower"].isin(tweets_df["twitter_lower"])]
-        social_media_df = social_media_df.rename({"id.bioguide": "bioguide", "twitter_lower": "twitter"}, axis=1)
+        social_media_df = social_media_df[social_media_df["twitter"].isin(tweets_df["twitter"])]
+        social_media_df = social_media_df.rename({"id.bioguide": "bioguide", "twitter": "twitter"}, axis=1)
 
         # join
         final_df = cook_pvi_df \
