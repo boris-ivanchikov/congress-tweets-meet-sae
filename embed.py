@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 import transformers
+transformers.utils.logging.disable_progress_bar()
 
 MODEL = "Qwen/Qwen3-Embedding-8B"
 
@@ -24,7 +25,7 @@ class TweetsDataset(Dataset):
     
     def __getitem__(self, idx):
         if isinstance(idx, slice):
-            self.data = self.data.loc[idx].reset_index(drop=True)
+            self.data = self.data.iloc[idx].reset_index(drop=True)
             return self
         return self.data.loc[idx, "tweet_id"], self.data.loc[idx, "text"]
 
@@ -66,6 +67,7 @@ def main(args):
         torch.cuda.set_device(local_rank)
         device = f"cuda:{local_rank}"
     else:
+        local_rank = 0
         device = torch.device("cuda")
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL, padding_side='left')
@@ -79,7 +81,7 @@ def main(args):
         dataset = dataset[:args.limit]
 
     if dist.is_initialized() and dist.get_world_size() > 1:
-        sampler = DistributedSampler(dataset, shuffle=False, drop_last=True)
+        sampler = DistributedSampler(dataset, shuffle=False, drop_last=False)
     else:
         sampler = None
 
@@ -96,7 +98,7 @@ def main(args):
     all_ids = []
     all_embeddings = []
     with torch.inference_mode():
-        for ids, seqs in tqdm(dataloader): # TODO: fix tqdm
+        for ids, seqs in tqdm(dataloader, disable=(local_rank != 0)):
             seqs = seqs.to(device)
             outputs = model(**seqs)
             embeddings = last_token_pool(outputs.last_hidden_state, seqs["attention_mask"])
@@ -108,26 +110,33 @@ def main(args):
     ids = np.concatenate(all_ids)
     embeddings = np.concatenate(all_embeddings)
 
-    # TODO: fix save
-    if dist.is_initialized():
-        rank = dist.get_rank()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            np.savez(os.path.join(tmpdir, f"embeddings_{rank}.npz"), ids=ids, embeddings=embeddings)
-            dist.barrier()
-        
-            if rank == 0:
-                chunks = [np.load(os.path.join(tmpdir, f"embeddings_{r}.npz") for r in range(dist.get_world_size()))]
-                np.savez("data/embeddings.npz",
-                        ids=np.concatenate([c["ids"] for c in chunks]),
-                        embeddings=np.concatenate([c["embeddings"] for c in chunks]))
-    else:
+    if not dist.is_initialized():
         np.savez("data/embeddings.npz", ids=ids, embeddings=embeddings)
+    else:
+        np.savez(f"data/embeddings_{local_rank}.npz", ids=ids, embeddings=embeddings)
+        dist.barrier()
+    
+        if local_rank == 0:
+            chunks = [np.load(f"data/embeddings_{r}.npz") for r in range(dist.get_world_size())]
+            all_ids = np.concatenate([c["ids"] for c in chunks])
+            all_embeddings = np.concatenate([c["embeddings"] for c in chunks])
+
+            _, unique_idx = np.unique(all_ids, return_index=True)
+            
+            np.savez("data/embeddings.npz", ids=all_ids[unique_idx], embeddings=all_embeddings[unique_idx])
+
+            for c in chunks:
+                c.close()
+            os.system("rm data/embeddings_*.npz")
 
 
 if __name__ == "__main__":
     args = parse_args()
-    if "RANK" in os.environ:
-        dist.init_process_group(backend="nccl")
+    if "LOCAL_RANK" in os.environ:
+        dist.init_process_group(
+            backend="nccl", 
+            device_id=torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+        )
         main(args)
         dist.destroy_process_group()
     else:
