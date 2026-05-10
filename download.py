@@ -1,7 +1,6 @@
 import os
 import tempfile
 import requests
-import numpy as np
 import pandas as pd
 from nomic import atlas
 import pyreadr
@@ -22,6 +21,7 @@ if __name__ == "__main__":
         tweets_df = tweets_df.rename({"tweetId": "tweet_id", "postedAt": "posted_at", "twitter_lower": "twitter"}, axis=1)
         tweets_df["name"] = tweets_df["name"].str.replace(r"([A-Z]-[A-Z][A-Z])", "", regex=True)
         tweets_df = tweets_df.drop(["state", "party", "chamber", "years", "source", "id"], axis=1)
+        tweets_df = tweets_df[tweets_df["text"] != "null"]
 
         tweets_df.to_csv("data/tweets.csv", index=False)
         print(f"Saved data/tweets.csv with {tweets_df.shape[0]} rows, columns: {list(tweets_df.columns)}")

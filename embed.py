@@ -53,7 +53,7 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default=MODEL)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--limit", type=int, default=None)
@@ -69,7 +69,7 @@ def main(args):
         device = torch.device("cuda")
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL, padding_side='left')
-    model = transformers.AutoModel.from_pretrained(MODEL, dtype=torch.float16).to(device)
+    model = transformers.AutoModel.from_pretrained(MODEL, dtype=torch.float16).to(device) # TODO: fix tqdm
     model.eval()
 
     dataset = TweetsDataset("data/tweets.csv")
@@ -96,7 +96,7 @@ def main(args):
     all_ids = []
     all_embeddings = []
     with torch.inference_mode():
-        for ids, seqs in tqdm(dataloader):
+        for ids, seqs in tqdm(dataloader): # TODO: fix tqdm
             seqs = seqs.to(device)
             outputs = model(**seqs)
             embeddings = last_token_pool(outputs.last_hidden_state, seqs["attention_mask"])
@@ -108,6 +108,7 @@ def main(args):
     ids = np.concatenate(all_ids)
     embeddings = np.concatenate(all_embeddings)
 
+    # TODO: fix save
     if dist.is_initialized():
         rank = dist.get_rank()
         with tempfile.TemporaryDirectory() as tmpdir:

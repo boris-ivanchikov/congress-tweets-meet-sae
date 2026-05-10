@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["torch", "transformers"]
+notebook = ["jupyter", "notebook"]
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
