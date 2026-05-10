@@ -1,0 +1,15 @@
+[project]
+name = "congress-tweets-meet-sae"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "requests",
+    "nomic",
+    "pyreadr",
+]
+ 
+[project.optional-dependencies]
+gpu = ["torch"]
+ 
