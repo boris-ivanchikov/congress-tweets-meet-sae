@@ -9,7 +9,14 @@ dependencies = [
     "nomic",
     "pyreadr",
 ]
- 
+
 [project.optional-dependencies]
-gpu = ["torch"]
- 
+gpu = ["torch", "transformers"]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
