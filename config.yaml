@@ -1,0 +1,9 @@
+input_dim: 4096
+expansion_factor: 8
+top_k: 256
+batch_top_k: True
+dead_num_iters: 100
+aux_top_k: 512
+aux_loss_weight: 0.03125
+sparsity_loss_weight: 0.0
+matryoshka_prefixes: [256, 512, 32768]
