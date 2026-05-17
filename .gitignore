@@ -3,3 +3,4 @@ weights/*
 .venv/*
 explore.ipynb
 runs
+__pycache__
