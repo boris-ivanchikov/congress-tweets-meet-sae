@@ -14,13 +14,16 @@ from model import EmbeddingLoader, SAE
 
 
 class Config(BaseModel):
-    epochs: int
-    batch_size: int
-    lr: float
+    # model
     input_dim: int = 4096
     expansion_factor: int = 8
     top_k: int | None = None
     batch_top_k: bool = False
+
+    # training
+    epochs: int
+    batch_size: int
+    lr: float
     dead_num_iters: int | None = None
     aux_top_k: int | None = None
     aux_loss_weight: float = 0.0
@@ -52,20 +55,17 @@ class TrainingGraph(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.model = SAE(config.input_dim, config.expansion_factor)
+        self.model = SAE(
+            input_dim=config.input_dim, 
+            expansion_factor=config.expansion_factor,
+            top_k=config.top_k,
+            batch_top_k=config.batch_top_k,
+        )
         self.dead_counter = torch.zeros(config.dict_size)
     
     def forward(self, x):
         z = self.model.encode(x)
-       
-        if not self.config.batch_top_k:
-            _, idx = z.topk(self.config.top_k, dim=1)
-            z_topk = torch.zeros_like(z).scatter_(1, idx, z.gather(1, idx))
-        else:
-            _, idx = z.flatten().topk(self.config.top_k * z.shape[0], dim=0)
-            z_topk = torch.zeros_like(z.flatten()) \
-                .scatter_(0, idx, z.flatten().gather(0, idx)) \
-                .reshape(z.shape)
+        z_topk = self.model.topk(z)
             
         errors = torch.stack([(x - self.model.decode(z_topk, prefix)) for prefix in self.config.matryoshka_prefixes])
         reconstruction_loss = (errors ** 2).mean()
@@ -95,18 +95,7 @@ class TrainingGraph(nn.Module):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True)
-    parser.add_argument('--num-workers', type=int, default=4)
-    parser.add_argument('--prefetch-factor', type=int, default=2)
-    parser.add_argument('--limit', type=int, default=None)
     return parser.parse_args()
-
-
-def convert(config: BaseModel) -> dict:
-    config_dict = config.model_dump()
-    for key in config_dict:
-        if isinstance(config_dict[key], list):
-            config_dict[key] = str(config_dict[key])
-    return config_dict
 
 
 def main(args):
@@ -153,7 +142,7 @@ def main(args):
 
     torch.save(graph.model.state_dict(), f"runs/{name}/weights.pt")
     with open(f"runs/{name}/config.json", "w") as f:
-        json.dump(convert(config), f)
+        json.dump(config, f, indent=4)
 
 
 if __name__ == "__main__":
