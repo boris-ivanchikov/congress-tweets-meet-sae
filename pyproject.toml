@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["torch", "transformers"]
+gpu = ["torch", "transformers", "tensorboard", "torch-tb-profiler", "unique-namer"]
 notebook = ["jupyter", "notebook"]
 
 [[tool.uv.index]]

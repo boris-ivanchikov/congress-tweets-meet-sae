@@ -1,4 +1,4 @@
-import os
+import random
 import argparse
 from tqdm import tqdm
 from pydantic import BaseModel, model_validator, computed_field
@@ -7,10 +7,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-
+from loguru import logger
+from torch.utils.tensorboard import SummaryWriter
+import namer
 
 class Config(BaseModel):
+    epochs: int
+    batch_size: int
+    lr: float
     input_dim: int = 4096
     expansion_factor: int = 8
     top_k: int | None = None
@@ -73,14 +77,12 @@ class SAE(nn.Module):
 
 
 class TrainingGraph(nn.Module):
-    def __init__(self, config, device):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.device = device
-        self.model = SAE(config.input_dim, config.expansion_factor).to(device)
-        self.dead_counter = torch.zeros(config.dict_size).to(device)
+        self.model = SAE(config.input_dim, config.expansion_factor)
+        self.dead_counter = torch.zeros(config.dict_size)
     
-
     def forward(self, x):
         z = self.model.encode(x)
        
@@ -107,7 +109,7 @@ class TrainingGraph(nn.Module):
             reconstructed_error = (dead_topk @ dead_topk_w_dec).squeeze(1)
             aux_loss = F.mse_loss(reconstructed_error, errors[-1])
         else:
-            aux_loss = torch.tensor(0.0, device=self.device)
+            aux_loss = torch.tensor(0.0, device=x.device)
 
         loss = reconstruction_loss + self.config.aux_loss_weight * aux_loss
 
@@ -131,7 +133,7 @@ class EmbeddingLoader:
         self.idx = self.idx[rank::world_size]
     
     def __len__(self):
-        return self.idx.shape[0]
+        return self.idx.shape[0] // self.batch_size
     
     def __iter__(self):
         for i in range(0, self.idx.shape[0], self.batch_size):
@@ -141,13 +143,18 @@ class EmbeddingLoader:
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True)
-    parser.add_argument('--batch-size', type=int, default=4096)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--prefetch-factor', type=int, default=2)
     parser.add_argument('--limit', type=int, default=None)
     return parser.parse_args()
+
+
+def convert(config: BaseModel) -> dict:
+    config_dict = config.model_dump()
+    for key in config_dict:
+        if isinstance(config_dict[key], list):
+            config_dict[key] = str(config_dict[key])
+    return config_dict
 
 
 def main(args):
@@ -156,26 +163,47 @@ def main(args):
     config = Config(**data)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     torch.random.manual_seed(42)
-    loader = EmbeddingLoader(path="data/embeddings.npz", batch_size=args.batch_size, shuffle=True)
-    graph = TrainingGraph(config, device=device)
-    optimizer = torch.optim.Adam(graph.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs * len(loader))
 
-    pbar = tqdm(total=args.epochs * len(loader))
-    for epoch in range(args.epoch):
-        pbar.set_description(f"Epoch {epoch+1}/{args.epochs}")
+    name = namer.generate() + "-" + str(random.randint(10, 99))
+    logger.info(f"Starting run {name}")
+    writer = SummaryWriter(f"runs/{name}")
+
+    logger.info("Creating loader...")
+    loader = EmbeddingLoader(path="data/embeddings.npz", batch_size=config.batch_size, shuffle=True)
+
+    logger.info("Creating graph...")
+    graph = TrainingGraph(config).to(device)
+
+    logger.info("Creating optimizer and sheduler...")
+    optimizer = torch.optim.Adam(graph.parameters(), lr=config.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs * len(loader))
+
+    pbar = tqdm(total=config.epochs * len(loader))
+    for epoch in range(config.epochs):
+        pbar.set_description(f"Epoch {epoch+1}/{config.epochs}")
         for i, (ids, x) in enumerate(loader):
-            optimizer.zero_grad()
-            outputs = graph(x)
+            outputs = graph(x.to(device))
             loss = outputs["loss"]
             loss.backward()
             graph.model.normalize_decoder_weights()
+
+            global_step = epoch * len(loader) + i
+            writer.add_scalar("lr", scheduler.get_last_lr()[0], global_step=global_step)
+            writer.add_scalar("loss", loss, global_step=global_step)
+            writer.add_scalar("reconstruction_loss", outputs["reconstruction_loss"], global_step=global_step)
+            writer.add_scalar("aux_loss", outputs["aux_loss"], global_step=global_step)
+
             optimizer.step()
             scheduler.step()
+            optimizer.zero_grad()
             pbar.update(1)
 
+    graph.model._save_to_state_dict(f"runs/{name}/weights.pt")
+    writer.add_hparams(
+        hparam_dict=convert(config),
+        metric_dict={"best_reconstruction_loss": outputs["reconstruction_loss"]}
+    )
 
 if __name__ == "__main__":
     args = parse_args()

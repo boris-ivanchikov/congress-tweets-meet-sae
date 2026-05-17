@@ -2,3 +2,4 @@ data/*
 weights/*
 .venv/*
 explore.ipynb
+runs
