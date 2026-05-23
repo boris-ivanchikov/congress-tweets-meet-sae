@@ -1,10 +1,12 @@
-epochs: 3
-batch_size: 4096
-lr: 3e-4
-input_dim: 4096
-expansion_factor: 8
-top_k: 64
-batch_top_k: false
-dead_num_iters: 500
-aux_loss_weight: 0.03125
-matryoshka_prefixes: [32768]
+model:
+  type: TopKSAE
+  input_dim: 4096
+  expansion_factor: 8
+  top_k: 64
+training:
+  epochs: 3
+  batch_size: 8192
+  lr: 3e-4
+  dead_num_iters: 500
+  aux_top_k: 128
+  aux_loss_weight: 0.03125

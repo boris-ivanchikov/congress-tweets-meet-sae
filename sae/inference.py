@@ -1,9 +1,11 @@
 import os
+import json
 import argparse
 import torch
 from tqdm import tqdm
-from model import EmbeddingLoader, SAE
+from model import EmbeddingLoader, init_sae
 from loguru import logger
+from scipy import sparse
 
 
 def parse_args():
@@ -20,10 +22,13 @@ def main(args):
     loader = EmbeddingLoader(path="../data/embeddings.npz", batch_size=args.batch_size, shuffle=False)
 
     logger.info(f"Loading model from {args.path}...")
-    model = SAE.load_checkpoint(args.path)
+    config_path = os.path.join(args.path, "config.json")
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    model = init_sae(config["model"]).to(device)
 
     for i, (ids, x) in tqdm(enumerate(loader)):
-        z_topk = model.topk(model.encode(x.to(device)))
+        z = model(x.to(device))
         # TODO
 
 
