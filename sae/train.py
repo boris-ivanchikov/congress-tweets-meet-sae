@@ -2,12 +2,11 @@
 import random
 import argparse
 from tqdm import tqdm
-from pydantic import BaseModel, model_validator, computed_field
+from pydantic import BaseModel
 import yaml
 import json
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from loguru import logger
 from torch.utils.tensorboard import SummaryWriter
 import namer
@@ -60,7 +59,7 @@ class TrainingGraph(nn.Module):
             dead_topk = z[:, dead_mask].gather(1, idx).unsqueeze(1)
             dead_topk_w_dec = self.model.w_dec.weight[:, dead_mask].T[idx]
             reconstructed_error = (dead_topk @ dead_topk_w_dec).squeeze(1)
-            aux_loss = normalized_mse(error, reconstructed_error)
+            aux_loss = normalized_mse(error.detach(), reconstructed_error)
         else:
             aux_loss = torch.tensor(0.0, device=x.device)
 

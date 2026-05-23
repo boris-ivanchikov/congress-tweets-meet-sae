@@ -5,7 +5,8 @@ import torch
 from tqdm import tqdm
 from model import EmbeddingLoader, init_sae
 from loguru import logger
-from scipy import sparse
+import numpy as np
+import scipy
 
 
 def parse_args():
@@ -27,9 +28,14 @@ def main(args):
         config = json.load(f)
     model = init_sae(config["model"]).to(device)
 
+    rows = []
+    cols = []
+    vals = []
     for i, (ids, x) in tqdm(enumerate(loader)):
-        z = model(x.to(device))
+        z = model(x.to(device)).cpu().float().numpy()
+        nz_rows, nz_cols = np.nonzero(z)
         # TODO
+
 
 
 if __name__ == '__main__':

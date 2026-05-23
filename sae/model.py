@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+
 class EmbeddingLoader:
     def __init__(self, path, batch_size, shuffle=True, rank=0, world_size=1): 
         with np.load(path) as data:
@@ -18,8 +19,10 @@ class EmbeddingLoader:
         return self.idx.shape[0] // self.batch_size
     
     def __iter__(self):
-        for i in range(0, self.idx.shape[0], self.batch_size):
-            yield self.ids[self.idx[i:i+self.batch_size]], self.embeddings[self.idx[i:i+self.batch_size]]
+        for i in range(len(self)):
+            start = i * self.batch_size
+            end = start + self.batch_size
+            yield self.ids[self.idx[start:end]], self.embeddings[self.idx[start:end]]
 
 
 class TopKSAE(nn.Module):
