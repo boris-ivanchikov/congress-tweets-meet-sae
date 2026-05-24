@@ -1,6 +1,6 @@
-data/*
 weights/*
 .venv/*
 explore.ipynb
-runs
 __pycache__
+/data
+/sae/runs
