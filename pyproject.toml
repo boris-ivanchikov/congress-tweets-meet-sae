@@ -9,11 +9,13 @@ dependencies = [
     "requests",
     "nomic",
     "pyreadr",
+    "h5py"
 ]
 
 [project.optional-dependencies]
 gpu = ["torch", "transformers", "tensorboard", "torch-tb-profiler", "unique-namer"]
 notebook = ["jupyter", "notebook"]
+dvc = ["dvc", "dvc-gdrive"]
 
 [[tool.uv.index]]
 name = "pytorch-cu121"

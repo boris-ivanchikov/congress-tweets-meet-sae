@@ -29,15 +29,11 @@ class TrainingConfig(BaseModel):
 
 
 class TrainingGraph(nn.Module):
-    def __init__(
-            self, 
-            model, 
-            config
-        ):
+    def __init__(self, model, config):
         super().__init__()
         self.config = config
         self.model = model
-        self.dead_counter = torch.zeros(model.dict_size)
+        self.register_buffer('dead_counter', torch.zeros(model.dict_size))
     
     def forward(self, x):
         z = self.model.encode(x)
@@ -100,7 +96,6 @@ def main(args):
 
     logger.info("Creating optimizer and sheduler...")
     optimizer = torch.optim.Adam(graph.parameters(), lr=config.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs * len(loader))
 
     pbar = tqdm(total=config.epochs * len(loader))
     for epoch in range(config.epochs):
@@ -112,14 +107,12 @@ def main(args):
             graph.model.normalize_decoder_weights()
 
             global_step = epoch * len(loader) + i
-            writer.add_scalar("lr", scheduler.get_last_lr()[0], global_step=global_step)
             writer.add_scalar("loss", loss, global_step=global_step)
             writer.add_scalar("reconstruction_loss", outputs["reconstruction_loss"], global_step=global_step)
             writer.add_scalar("aux_loss", outputs["aux_loss"], global_step=global_step)
             writer.add_scalar("num_dead", outputs["num_dead"], global_step=global_step)
 
             optimizer.step()
-            scheduler.step()
             optimizer.zero_grad()
             pbar.update(1)
 

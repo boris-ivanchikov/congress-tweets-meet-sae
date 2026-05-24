@@ -4,25 +4,32 @@ import torch.nn as nn
 
 
 class EmbeddingLoader:
-    def __init__(self, path, batch_size, shuffle=True, rank=0, world_size=1): 
+    def __init__(
+            self, 
+            path, 
+            batch_size,
+            shuffle=True, 
+            drop_partial_batch=True
+        ): 
         with np.load(path) as data:
             self.ids = torch.from_numpy(data["ids"])
             self.embeddings = torch.from_numpy(data["embeddings"])
         self.batch_size = batch_size
-        if not shuffle:
-            self.idx = torch.arange(self.ids.shape[0])
-        else:
-            self.idx = torch.randperm(self.ids.shape[0])
-        self.idx = self.idx[rank::world_size]
+        self.shuffle = shuffle
+        self.drop_partial_batch = drop_partial_batch
     
     def __len__(self):
-        return self.idx.shape[0] // self.batch_size
+        if self.drop_partial_batch:
+            return self.ids.shape[0] // self.batch_size
+        return (self.ids.shape[0] + self.batch_size - 1) // self.batch_size
+        
     
     def __iter__(self):
+        idx = torch.randperm(self.ids.shape[0]) if self.shuffle else torch.arange(self.ids.shape[0]) 
         for i in range(len(self)):
             start = i * self.batch_size
             end = start + self.batch_size
-            yield self.ids[self.idx[start:end]], self.embeddings[self.idx[start:end]]
+            yield self.ids[idx[start:end]], self.embeddings[idx[start:end]]
 
 
 class TopKSAE(nn.Module):
