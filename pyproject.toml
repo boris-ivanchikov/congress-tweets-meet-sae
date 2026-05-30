@@ -11,6 +11,7 @@ dependencies = [
     "pyreadr",
     "h5py",
     "huggingface_hub",
+    "hf_transfer",
     "jupyter",
     "notebook"
 ]

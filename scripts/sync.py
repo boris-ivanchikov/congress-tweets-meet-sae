@@ -1,4 +1,5 @@
 import subprocess, sys, os
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 REPO = "ivanchikovboris/congress-tweets-meet-sae"
 FOLDERS = ["data", "sae/runs"]
