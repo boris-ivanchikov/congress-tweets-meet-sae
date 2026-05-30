@@ -30,7 +30,7 @@ build-backend = "hatchling.build"
 packages = ["scripts"]
 
 [project.scripts]
-hfsync = "scripts.sync:main"
+hfsync = "scripts.hfsync:main"
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
