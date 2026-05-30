@@ -1,5 +1,6 @@
-.venv/*
 explore.ipynb
 __pycache__
 /data
 /sae/runs
+/renv
+/.venv
