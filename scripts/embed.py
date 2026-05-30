@@ -131,6 +131,9 @@ def main(args):
 
 
 if __name__ == "__main__":
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(root)
+    
     args = parse_args()
     if "LOCAL_RANK" in os.environ:
         dist.init_process_group(

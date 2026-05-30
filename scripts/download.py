@@ -7,6 +7,9 @@ import pyreadr
 
 if __name__ == "__main__":
 
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(root)
+
     if not os.path.exists("data"):
         os.mkdir("data")
 
