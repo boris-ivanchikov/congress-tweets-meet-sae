@@ -388,10 +388,13 @@ wheels = [
 [[package]]
 name = "congress-tweets-meet-sae"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "h5py" },
+    { name = "huggingface-hub" },
+    { name = "jupyter" },
     { name = "nomic" },
+    { name = "notebook" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyreadr" },
@@ -407,17 +410,14 @@ gpu = [
     { name = "transformers" },
     { name = "unique-namer" },
 ]
-notebook = [
-    { name = "jupyter" },
-    { name = "notebook" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "h5py" },
-    { name = "jupyter", marker = "extra == 'notebook'" },
+    { name = "huggingface-hub" },
+    { name = "jupyter" },
     { name = "nomic" },
-    { name = "notebook", marker = "extra == 'notebook'" },
+    { name = "notebook" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyreadr" },
@@ -429,7 +429,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'gpu'" },
     { name = "unique-namer", marker = "extra == 'gpu'" },
 ]
-provides-extras = ["gpu", "notebook"]
+provides-extras = ["gpu"]
 
 [[package]]
 name = "debugpy"
