@@ -400,6 +400,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pyreadr" },
     { name = "requests" },
+    { name = "rich" },
     { name = "scipy" },
 ]
 
@@ -424,6 +425,7 @@ requires-dist = [
     { name = "pandas" },
     { name = "pyreadr" },
     { name = "requests" },
+    { name = "rich" },
     { name = "scipy" },
     { name = "tensorboard", marker = "extra == 'gpu'" },
     { name = "torch", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu121" },

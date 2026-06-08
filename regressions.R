@@ -3,6 +3,7 @@ library(Matrix)
 library(data.table)
 library(fixest)
 library(progress)
+library(stats)
 setFixest_nthreads(0)
 setFixest_notes(FALSE)
 
@@ -47,20 +48,37 @@ activations <- sparseMatrix(
 rownames(activations) <- ids
 
 # regressions
-specification <- act_i ~ pvi_change:post | bioguide + posted_ym
 dataset_acts <- activations[dataset[, tweet_id], ]
 result <- data.table(idx = 1:D)
 
-for (i in 1:D) {
-    act_i <- dataset_acts[, i]
-    if (var(act_i) == 0) next
-    model <- feols(
-        specification, 
-        data = data.table(act_i, dataset),
-        cluster = ~bioguide
-    )
-    result[i, beta := coef(model)["pvi_change:post"]]
-    result[i, pval := pvalue(model)]
+chunk_size <- 100
+num_chunks <- D %/% chunk_size + (D %% chunk_size > 0)
+
+pb <- progress_bar$new(
+  format = " Processing Data [:bar] :percent | ETA: :eta | Step :current/:total",
+  total = num_chunks, 
+  clear = FALSE,
+  width = 120    
+)
+
+for (i in 1:num_chunks) {
+    start <- (i - 1) * chunk_size + 1
+    end <- min(i * chunk_size, D)
+
+    act_names <- paste0("act_", start:end)
+    acts_chunk <- as.matrix(dataset_acts[, start:end])
+    colnames(acts_chunk) <- act_names
+
+    dt <- cbind(as.data.table(acts_chunk), dataset)
+    
+    fml <- as.formula(paste0(
+        "c(", paste(act_names, collapse = ","), ") ~ pvi_change:post | bioguide + posted_ym"
+    ))
+
+    models <- feols(fml, data = dt, cluster = ~bioguide)
+
+    result[start:end, beta := sapply(models, \(m) coef(m)["pvi_change:post"])]
+    result[start:end, pval := sapply(models, \(m) pvalue(m)["pvi_change:post"])]
 
     pb$tick()
 }
