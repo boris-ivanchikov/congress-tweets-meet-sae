@@ -29,7 +29,7 @@ dataset <- tweets[representatives, on = "twitter"
 ][, .(tweet_id, posted_ym, bioguide, pvi_change, post, party, ran_for_reelection)]
 
 # sae activations
-ACTIVATIONS_FILE <- "sae/runs/rare-almanac-24/activations.h5"
+ACTIVATIONS_FILE <- "sae/runs/essential-bathrobe-64/activations.h5"
 
 ids <- as.character(h5read(ACTIVATIONS_FILE, "ids", bit64conversion = 'bit64'))
 data <- h5read(ACTIVATIONS_FILE, "data")

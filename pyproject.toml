@@ -14,11 +14,14 @@ dependencies = [
     "hf_transfer",
     "jupyter",
     "notebook",
-    "rich"
+    "rich",
+    "captum",
+    "torch", 
+    "transformers", 
+    "tensorboard", 
+    "torch-tb-profiler", 
+    "unique-namer"
 ]
-
-[project.optional-dependencies]
-gpu = ["torch", "transformers", "tensorboard", "torch-tb-profiler", "unique-namer"]
 
 [tool.uv]
 package = true

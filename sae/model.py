@@ -71,14 +71,14 @@ class TopKSAE(nn.Module):
 class BatchTopKSAE(TopKSAE):
     def __init__(self, input_dim: int, expansion_factor: int, top_k: int):
         super().__init__(input_dim, expansion_factor, top_k)
-        self.threshold = torch.register_buffer("threshold", torch.zeros(1))
+        self.register_buffer("threshold", torch.zeros(1))
     
     def topk(self, z):
         values, idx = z.flatten().topk(self.top_k * z.shape[0], dim=0)
         z_topk = torch.zeros_like(z.flatten()) \
             .scatter_(0, idx, z.flatten().gather(0, idx)) \
             .reshape(z.shape)
-        self.threshold = self.threshold * 0.9 + values.min() * 0.1
+        self.threshold = self.threshold.detach() * 0.9 + values.min().item() * 0.1
         return z_topk
 
     def forward(self, x):

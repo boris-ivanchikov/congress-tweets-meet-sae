@@ -25,7 +25,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     logger.info("Creating loader...")
-    loader = EmbeddingLoader(path="../data/embeddings.npz", batch_size=args.batch_size, shuffle=False, drop_partial_batch=False)
+    loader = EmbeddingLoader(path="data/embeddings.npz", batch_size=args.batch_size, shuffle=False, drop_partial_batch=False)
 
     logger.info(f"Loading model from {args.path}...")
     config_path = os.path.join(args.path, "config.json")
@@ -76,5 +76,8 @@ def main(args):
 
 
 if __name__ == '__main__':
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(root)
+
     args = parse_args()
     main(args)
