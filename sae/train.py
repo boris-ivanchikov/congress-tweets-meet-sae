@@ -126,8 +126,10 @@ def main(args):
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    args.config = os.path.abspath(args.config)
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
-
-    args = parse_args()
+    
     main(args)

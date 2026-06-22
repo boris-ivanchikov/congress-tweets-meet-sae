@@ -16,11 +16,14 @@ dependencies = [
     "notebook",
     "rich",
     "captum",
-    "torch", 
-    "transformers", 
-    "tensorboard", 
-    "torch-tb-profiler", 
-    "unique-namer"
+    "torch",
+    "transformers",
+    "accelerate",
+    "jinja2",
+    "tensorboard",
+    "torch-tb-profiler",
+    "unique-namer",
+    "py-spy"
 ]
 
 [tool.uv]

@@ -28,8 +28,8 @@ dataset <- tweets[representatives, on = "twitter"
 ][, posted_ym := format(posted_at, "%Y-%m")
 ][, .(tweet_id, posted_ym, bioguide, pvi_change, post, party, ran_for_reelection)]
 
-# sae activations
-ACTIVATIONS_FILE <- "sae/runs/essential-bathrobe-64/activations.h5"
+# loading sae activations
+ACTIVATIONS_FILE <- "sae/runs/convenient-advertising-92/activations.h5"
 
 ids <- as.character(h5read(ACTIVATIONS_FILE, "ids", bit64conversion = 'bit64'))
 data <- h5read(ACTIVATIONS_FILE, "data")
@@ -46,31 +46,69 @@ activations <- sparseMatrix(
     dims = shape
 )
 rownames(activations) <- ids
-
-# regressions
+colnames(activations) <- paste0("act_", 1:D)
 dataset_acts <- activations[dataset[, tweet_id], ]
-result <- data.table(idx = 1:D)
+
+# filtering activations
+MIN_NUM_REPS <- 50
+MIN_PCT_ACTS <- 0.1
+MAX_PCT_ACTS <- 10.0
 
 chunk_size <- 100
 num_chunks <- D %/% chunk_size + (D %% chunk_size > 0)
 
 pb <- progress_bar$new(
-  format = " Processing Data [:bar] :percent | ETA: :eta | Step :current/:total",
-  total = num_chunks, 
+  format = " Filtering Activations [:bar] :percent | ETA: :eta | Step :current/:total",
+  total = num_chunks,
   clear = FALSE,
-  width = 120    
+  width = 120
+)
+
+keep <- integer(0)
+for (i in 1:num_chunks) {
+    start <- (i - 1) * chunk_size + 1
+    end <- min(i * chunk_size, D)
+    chunk_idx <- start:end
+
+    pos <- as.matrix(dataset_acts[, chunk_idx]) > 0
+    num_acts <- colSums(pos)
+    num_reps <- sapply(seq_along(chunk_idx), \(j) uniqueN(dataset$bioguide[pos[, j]]))
+
+    keep <- c(keep, chunk_idx[
+      num_reps > MIN_NUM_REPS
+      & num_acts > N * MIN_PCT_ACTS / 100  
+      & num_acts < N * MAX_PCT_ACTS / 100
+    ])
+    pb$tick()
+}
+
+dataset_acts <- dataset_acts[, keep]
+print(paste0("Kept ", length(keep), " of ", D, " activations"))
+
+# tweet-level regressions
+n_keep <- ncol(dataset_acts)
+result <- data.table(orig_idx = keep)
+
+chunk_size <- 100
+num_chunks <- n_keep %/% chunk_size + (n_keep %% chunk_size > 0)
+
+pb <- progress_bar$new(
+  format = " Fitting Regressions [:bar] :percent | ETA: :eta | Step :current/:total",
+  total = num_chunks,
+  clear = FALSE,
+  width = 120
 )
 
 for (i in 1:num_chunks) {
     start <- (i - 1) * chunk_size + 1
-    end <- min(i * chunk_size, D)
+    end <- min(i * chunk_size, n_keep)
 
-    act_names <- paste0("act_", start:end)
+    act_names <- colnames(dataset_acts)[start:end]
     acts_chunk <- as.matrix(dataset_acts[, start:end])
     colnames(acts_chunk) <- act_names
 
     dt <- cbind(as.data.table(acts_chunk), dataset)
-    
+
     fml <- as.formula(paste0(
         "c(", paste(act_names, collapse = ","), ") ~ pvi_change:post | bioguide + posted_ym"
     ))

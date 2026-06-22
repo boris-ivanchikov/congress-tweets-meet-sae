@@ -1,12 +1,12 @@
 model:
   type: MatryoshkaSAE
   input_dim: 4096
-  expansion_factor: 4
-  top_k: 128
-  prefixes: [128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+  expansion_factor: 8
+  top_k: 64
+  prefixes: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 training:
-  epochs: 30
-  batch_size: 32784
+  epochs: 64
+  batch_size: 16384
   lr: 3e-4
   dead_num_iters: 500
   aux_top_k: 128
