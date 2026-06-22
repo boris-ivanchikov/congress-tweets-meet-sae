@@ -123,34 +123,26 @@ def embeddings_memmap(path=EMBEDDINGS):
 def compute_preacts(run_path, feature_ids):
     import torch
 
-    cache_dir = os.path.join(run_path, "preacts")
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_path = lambda f: os.path.join(cache_dir, f"feat_{f}.npy")
-
     with np.load(EMBEDDINGS) as data:
         pre_ids = data["ids"][:]
 
-    missing = [f for f in feature_ids if not os.path.exists(cache_path(f))]
-    if missing:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        sae = load_sae(run_path, device)
-        with torch.no_grad():
-            idx = torch.tensor([f - 1 for f in missing], device=device)
-            w_sub = sae.w_enc.weight[idx].float()
-            b_sub = sae.b_enc[idx].float()
-            b_pre = sae.b_pre.float()
-            mm = embeddings_memmap()
-            n = mm.shape[0]
-            out = np.empty((n, len(missing)), dtype=np.float32)
-            for s in tqdm(range(0, n, PREACT_BATCH), desc="Pre-activations"):
-                e = min(s + PREACT_BATCH, n)
-                x = torch.from_numpy(np.array(mm[s:e])).to(device).float()
-                out[s:e] = ((x - b_pre) @ w_sub.T + b_sub).cpu().numpy()
-        for k, f in enumerate(missing):
-            np.save(cache_path(f), out[:, k])
-        del sae
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    sae = load_sae(run_path, device)
+    with torch.no_grad():
+        idx = torch.tensor([f - 1 for f in feature_ids], device=device)
+        w_sub = sae.w_enc.weight[idx].float()
+        b_sub = sae.b_enc[idx].float()
+        b_pre = sae.b_pre.float()
+        mm = embeddings_memmap()
+        n = mm.shape[0]
+        out = np.empty((n, len(feature_ids)), dtype=np.float32)
+        for s in tqdm(range(0, n, PREACT_BATCH), desc="Pre-activations"):
+            e = min(s + PREACT_BATCH, n)
+            x = torch.from_numpy(np.array(mm[s:e])).to(device).float()
+            out[s:e] = ((x - b_pre) @ w_sub.T + b_sub).cpu().numpy()
+    del sae
 
-    return pre_ids, {f: np.load(cache_path(f)) for f in feature_ids}
+    return pre_ids, {f: out[:, k] for k, f in enumerate(feature_ids)}
 
 
 def human_date(value):
@@ -696,7 +688,6 @@ def parse_args():
     parser.add_argument("--autointerp-model", type=str, default=AUTOINTERP_MODEL, help="HF model id for autointerp")
     parser.add_argument("--autointerp-examples", type=int, default=AUTOINTERP_N_EXAMPLES,
                         help="Top-K strongest distinct tweets fed to the LLM")
-    parser.add_argument("--autointerp-refresh", action="store_true", help="Ignore cached interpretations")
     return parser.parse_args()
 
 
@@ -830,31 +821,13 @@ def parse_score_output(raw, n):
     return nums if len(nums) == n else None
 
 
-def autointerp_all_cached(run_path, feature_ids, model_id):
-    cache_dir = os.path.join(run_path, "autointerp")
-    results = {}
-    for fid in feature_ids:
-        path = os.path.join(cache_dir, f"feat_{fid}.json")
-        if not os.path.exists(path):
-            return None
-        with open(path) as fh:
-            cached = json.load(fh)
-        if cached.get("model") != model_id:
-            return None
-        results[fid] = cached
-    return results
-
-
 class FeatureInterpreter:
-    def __init__(self, model_id, run_path, refresh=False):
+    def __init__(self, model_id):
         import torch
         import transformers
 
         self.torch = torch
         self.model_id = model_id
-        self.refresh = refresh
-        self.cache_dir = os.path.join(run_path, "autointerp")
-        os.makedirs(self.cache_dir, exist_ok=True)
 
         n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
         print(f"Loading {model_id} for autointerp (fp16, device_map=auto across {n_gpu} GPU(s))...")
@@ -866,9 +839,6 @@ class FeatureInterpreter:
         self.input_device = self.model.get_input_embeddings().weight.device
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-    def _cache_path(self, feature_id):
-        return os.path.join(self.cache_dir, f"feat_{feature_id}.json")
 
     def _generate(self, messages, max_new_tokens):
         torch = self.torch
@@ -897,30 +867,19 @@ class FeatureInterpreter:
         return round(sum(int(p == l) for p, l in zip(preds, labels)) / len(labels), 3)
 
     def interpret(self, feature_id, examples, positives, negatives):
-        path = self._cache_path(feature_id)
-        if not self.refresh and os.path.exists(path):
-            with open(path) as fh:
-                cached = json.load(fh)
-            if cached.get("model") == self.model_id:
-                return cached
-
         if not examples:
-            result = {"label": "(no activating tweets)",
-                      "explanation": "This feature did not activate on any tweet in the corpus.",
-                      "score": None, "n_examples": 0, "n_pos": 0, "n_neg": 0, "model": self.model_id}
-        else:
-            label, explanation = parse_interp_output(
-                self._generate(build_interp_messages(examples), AUTOINTERP_MAX_NEW_TOKENS))
-            score = None
-            if explanation and positives and negatives:
-                score = self._score(explanation, positives, negatives, feature_id)
-            result = {"label": label, "explanation": explanation, "score": score,
-                      "n_examples": len(examples), "n_pos": len(positives), "n_neg": len(negatives),
-                      "model": self.model_id}
+            return {"label": "(no activating tweets)",
+                    "explanation": "This feature did not activate on any tweet in the corpus.",
+                    "score": None, "n_examples": 0, "n_pos": 0, "n_neg": 0, "model": self.model_id}
 
-        with open(path, "w") as fh:
-            json.dump(result, fh, indent=2)
-        return result
+        label, explanation = parse_interp_output(
+            self._generate(build_interp_messages(examples), AUTOINTERP_MAX_NEW_TOKENS))
+        score = None
+        if explanation and positives and negatives:
+            score = self._score(explanation, positives, negatives, feature_id)
+        return {"label": label, "explanation": explanation, "score": score,
+                "n_examples": len(examples), "n_pos": len(positives), "n_neg": len(negatives),
+                "model": self.model_id}
 
 
 def main(args):
@@ -980,19 +939,13 @@ def main(args):
             torch.cuda.empty_cache()
 
     if args.autointerp:
-        cached = None if args.autointerp_refresh else autointerp_all_cached(args.path, args.features, args.autointerp_model)
-        if cached is not None:
-            print("Auto-interp: all features cached.")
-            for f in features_raw:
-                f["autointerp"] = cached[f["id"]]
-        else:
-            interp = FeatureInterpreter(args.autointerp_model, args.path, refresh=args.autointerp_refresh)
-            for f in tqdm(features_raw, desc="Auto-interp"):
-                f["autointerp"] = interp.interpret(f["id"], f["interp_examples"], f["score_pos"], f["score_neg"])
-            del interp
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        interp = FeatureInterpreter(args.autointerp_model)
+        for f in tqdm(features_raw, desc="Auto-interp"):
+            f["autointerp"] = interp.interpret(f["id"], f["interp_examples"], f["score_pos"], f["score_neg"])
+        del interp
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     out_path = args.out or os.path.join(args.path, "report.html")
     with open(out_path, "w") as f:

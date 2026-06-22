@@ -7,6 +7,8 @@ library(stats)
 setFixest_nthreads(0)
 setFixest_notes(FALSE)
 
+PATH <- "sae/runs/convenient-advertising-92/"
+
 # data selection
 START_DATE <- as.Date("2019-01-03") # 116th Congress start
 END_DATE <- as.Date("2022-11-08") # 118th Congress election day
@@ -29,7 +31,7 @@ dataset <- tweets[representatives, on = "twitter"
 ][, .(tweet_id, posted_ym, bioguide, pvi_change, post, party, ran_for_reelection)]
 
 # loading sae activations
-ACTIVATIONS_FILE <- "sae/runs/convenient-advertising-92/activations.h5"
+ACTIVATIONS_FILE <- file.path(PATH, "activations.h5")
 
 ids <- as.character(h5read(ACTIVATIONS_FILE, "ids", bit64conversion = 'bit64'))
 data <- h5read(ACTIVATIONS_FILE, "data")
@@ -116,7 +118,10 @@ for (i in 1:num_chunks) {
     models <- feols(fml, data = dt, cluster = ~bioguide)
 
     result[start:end, beta := sapply(models, \(m) coef(m)["pvi_change:post"])]
+    result[start:end, se := sapply(models, \(m) se(m)["pvi_change:post"])]
     result[start:end, pval := sapply(models, \(m) pvalue(m)["pvi_change:post"])]
 
     pb$tick()
 }
+
+fwrite(result[order(pval)], file.path(PATH, "pvals.csv"))
