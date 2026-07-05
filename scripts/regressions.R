@@ -26,9 +26,11 @@ dataset <- tweets[representatives, on = "twitter"
   posted_at >= first_day_in_office
 ][ran_for_reelection == 1
 ][, pvi_change := cook_pvi_new - cook_pvi_old
+][, is_republican := as.numeric(party == "R")
+][, pvi_change_relative := fifelse(party == "R", pvi_change, -pvi_change)
 ][, post := as.numeric(posted_at > maps_finalized)
 ][, posted_ym := format(posted_at, "%Y-%m")
-][, .(tweet_id, posted_ym, bioguide, pvi_change, post, party, ran_for_reelection)]
+][, .(tweet_id, posted_ym, bioguide, is_republican, pvi_change_relative, post, party, ran_for_reelection)]
 
 # loading sae activations
 ACTIVATIONS_FILE <- file.path(PATH, "activations.h5")
@@ -86,6 +88,7 @@ for (i in 1:num_chunks) {
 
 dataset_acts <- dataset_acts[, keep]
 print(paste0("Kept ", length(keep), " of ", D, " activations"))
+saveRDS(keep, file.path(PATH, "keep.rds"))
 
 # tweet-level regressions
 n_keep <- ncol(dataset_acts)
@@ -112,16 +115,25 @@ for (i in 1:num_chunks) {
     dt <- cbind(as.data.table(acts_chunk), dataset)
 
     fml <- as.formula(paste0(
-        "c(", paste(act_names, collapse = ","), ") ~ pvi_change:post | bioguide + posted_ym"
+        "c(", paste(act_names, collapse = ","), ") ~ post + post:pvi_change_relative + post:is_republican | bioguide + posted_ym"
     ))
 
     models <- feols(fml, data = dt, cluster = ~bioguide)
 
-    result[start:end, beta := sapply(models, \(m) coef(m)["pvi_change:post"])]
-    result[start:end, se := sapply(models, \(m) se(m)["pvi_change:post"])]
-    result[start:end, pval := sapply(models, \(m) pvalue(m)["pvi_change:post"])]
+    result[start:end, `:=`(
+        beta      = sapply(models, \(m) coef(m)["post:pvi_change_relative"]),
+        se        = sapply(models, \(m) se(m)["post:pvi_change_relative"]),
+        pval      = sapply(models, \(m) pvalue(m)["post:pvi_change_relative"]),
+        beta_post = sapply(models, \(m) coef(m)["post"]),
+        se_post   = sapply(models, \(m) se(m)["post"]),
+        pval_post = sapply(models, \(m) pvalue(m)["post"]),
+        beta_rep  = sapply(models, \(m) coef(m)["post:is_republican"]),
+        se_rep    = sapply(models, \(m) se(m)["post:is_republican"]),
+        pval_rep  = sapply(models, \(m) pvalue(m)["post:is_republican"]),
+        nobs      = sapply(models, nobs)
+    )]
 
     pb$tick()
 }
 
-fwrite(result[order(pval)], file.path(PATH, "pvals.csv"))
+fwrite(result[order(pval)], file.path(PATH, "regressions.csv"))

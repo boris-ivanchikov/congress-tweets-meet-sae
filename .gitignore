@@ -3,3 +3,14 @@ __pycache__
 /data
 /sae/runs
 /.venv
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg

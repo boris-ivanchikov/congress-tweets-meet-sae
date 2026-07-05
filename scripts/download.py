@@ -4,6 +4,8 @@ import requests
 import pandas as pd
 from nomic import atlas
 import pyreadr
+import zipfile
+from io import BytesIO
 
 if __name__ == "__main__":
 
@@ -201,5 +203,29 @@ if __name__ == "__main__":
 
         final_df.to_csv("data/representatives.csv", index=False)
         print(f"Saved data/representatives.csv with {final_df.shape[0]} rows, columns: {list(final_df.columns)}")
+
+    # Hexmap: Daniel Donner / The Downballot (CC BY 4.0): http://the-db.co/maps
+
+    if os.path.exists("data/maps") and os.listdir("data/maps"):
+        print("data/maps already exists, skipping.")
+    else:
+        os.makedirs("data/maps", exist_ok=True)
+
+        # v2.1 - 2020
+        shepfile_2_1 = requests.get("https://drive.google.com/uc?export=download&id=1S3wOs6v3UtYrCdQ1MpuXglTyDKTsDtn-")
+        outlines_2_1 = requests.get("https://drive.google.com/uc?export=download&id=1Ev8kw5jY4T46oRNauro-gt2ngMkxBWQ7")
+
+        with zipfile.ZipFile(BytesIO(shepfile_2_1.content)) as zf:
+            zf.extractall("data/maps")
+        with zipfile.ZipFile(BytesIO(outlines_2_1.content)) as zf:
+            zf.extractall("data/maps")
+
+        # v3.0 - 2022
+        shepfile_3_0 = requests.get("https://drive.google.com/uc?export=download&id=1tml00kuyxaGNpHoERzqhAjUHlVsSVNIK")
+        outlines_3_0 = requests.get("https://drive.google.com/uc?export=download&id=10thkt1J_lpHSZvqLmOOmIbclqq1ct9zv")
+        with zipfile.ZipFile(BytesIO(shepfile_3_0.content)) as zf:
+            zf.extractall("data/maps")
+        with zipfile.ZipFile(BytesIO(outlines_3_0.content)) as zf:
+            zf.extractall("data/maps")
         
     print("Done.")

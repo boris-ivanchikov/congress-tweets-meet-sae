@@ -1,0 +1,74 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[scaled]{helvet}
+\usepackage{pgf}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{\textcolor{gray!70}{\itshape [#1]}}
+
+\title{Redistricting and Political Communication:\\
+Evidence from U.S. House Members on Twitter\thanks{\todo{Acknowledgements,
+funding, and disclaimers go here.}}}
+\author{Boris Ivanchikov\\
+\small \todo{Affiliation, program, supervisor}}
+\date{\today\\\small Draft --- please do not circulate}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\todo{One paragraph: research question, the redistricting natural experiment,
+the tweet corpus and measurement approach, headline finding.}
+\end{abstract}
+
+\section{Introduction}
+\todo{Motivation: electoral incentives and representation; why redistricting
+is a useful shock to constituency composition; preview of design, data, and
+findings; contribution relative to existing work.}
+
+\section{Background and Related Work}
+\todo{Literature on redistricting and legislator behavior; position-taking
+and home style; text-as-data studies of congressional communication.}
+
+\section{Redistricting as a Natural Experiment}
+\todo{Institutional background of the 2020--2022 cycle; timing of map
+proposals and enactment by state; why boundary changes are plausibly
+exogenous to an individual incumbent's communication strategy; definition of
+treatment (change in district partisanship) and control (unchanged PVI).}
+
+\begin{figure}[p]
+  \centering
+  {\sffamily\resizebox{\textwidth}{!}{\input{redistricting.pgf}}}
+  \caption{Congressional district partisanship before and after the
+  2020--2022 redistricting cycle. \todo{Full caption to be written.}}
+  \label{fig:redistricting}
+\end{figure}
+
+\section{Data}
+\todo{Tweet corpus of members of Congress; Cook PVI by district
+(Kaslovsky and Kistner, 2025); legislator metadata and Twitter handle
+matching; sample construction and descriptive statistics.}
+
+\section{Empirical Strategy}
+\todo{Specification: outcome measures derived from tweets; comparison of
+treated and control incumbents around map enactment dates; identification
+assumptions and threats (member--member pairings, retirements, strategic
+timing).}
+
+\section{Results}
+\todo{Main estimates; dynamics around redistricting events; heterogeneity by
+party, seniority, and magnitude of PVI change.}
+
+\section{Robustness}
+\todo{Alternative outcome definitions; placebo dates; excluding
+court-overturned maps (NY, OH); sensitivity to sample restrictions.}
+
+\section{Discussion and Conclusion}
+\todo{Interpretation, limitations, and directions for future work.}
+
+\end{document}
