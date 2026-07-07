@@ -1,3 +1,4 @@
+% !TeX program = lualatex
 \documentclass[11pt]{article}
 
 \usepackage[margin=2.5cm]{geometry}
@@ -10,38 +11,23 @@
 
 \newcommand{\todo}[1]{\textcolor{gray!70}{\itshape [#1]}}
 
-\title{Redistricting and Political Communication:\\
-Evidence from U.S. House Members on Twitter\thanks{\todo{Acknowledgements,
-funding, and disclaimers go here.}}}
-\author{Boris Ivanchikov\\
-\small \todo{Affiliation, program, supervisor}}
-\date{\today\\\small Draft --- please do not circulate}
+\title{Electoral Pressure and Political Rhetoric:\\An Exploratory Causal Analysis with Sparse Autoencoders}
+\author{Boris Ivanchikov}
+\date{\today\\[0.5em]\small Draft}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-\todo{One paragraph: research question, the redistricting natural experiment,
-the tweet corpus and measurement approach, headline finding.}
+Do politicians adapt their communication in response to changes in their electorate, and along which dimensions? We analyze the communication of U.S. House members on Twitter (now X) around the 2020 redistricting cycle, exploiting map-induced shifts in district partisanship as quasi-random variation in electoral pressure within a difference-in-differences design. Prior work quantifies rhetoric through word frequencies or pre-specified categories, constraining the scope of discoverable effects to dimensions chosen in advance. Instead, we adopt an exploratory causal inference approach, using a foundation model and a sparse autoencoder (SAE) to construct a data-driven atlas of rhetorical dimensions. Estimating treatment effects across thousands of candidate features raises a severe multiple-testing problem, which we address \todo{somehow}. We find \todo{some cool stuff}. To our knowledge, this constitutes the first application of exploratory causal inference to observational social-science data. 
 \end{abstract}
 
 \section{Introduction}
-\todo{Motivation: electoral incentives and representation; why redistricting
-is a useful shock to constituency composition; preview of design, data, and
-findings; contribution relative to existing work.}
 
-\section{Background and Related Work}
-\todo{Literature on redistricting and legislator behavior; position-taking
-and home style; text-as-data studies of congressional communication.}
+\subsection{Redistricting and Congressional Communication}
 
-\section{Redistricting as a Natural Experiment}
-\todo{Institutional background of the 2020--2022 cycle; timing of map
-proposals and enactment by state; why boundary changes are plausibly
-exogenous to an individual incumbent's communication strategy; definition of
-treatment (change in district partisanship) and control (unchanged PVI).}
-
-\begin{figure}[p]
+\begin{figure}[ht!]
   \centering
   {\sffamily\resizebox{\textwidth}{!}{\input{redistricting.pgf}}}
   \caption{Congressional district partisanship before and after the
@@ -49,26 +35,16 @@ treatment (change in district partisanship) and control (unchanged PVI).}
   \label{fig:redistricting}
 \end{figure}
 
-\section{Data}
-\todo{Tweet corpus of members of Congress; Cook PVI by district
-(Kaslovsky and Kistner, 2025); legislator metadata and Twitter handle
-matching; sample construction and descriptive statistics.}
+\subsection{Sparse Autoencoders}
 
-\section{Empirical Strategy}
-\todo{Specification: outcome measures derived from tweets; comparison of
-treated and control incumbents around map enactment dates; identification
-assumptions and threats (member--member pairings, retirements, strategic
-timing).}
+\todo{TODO}
+
+\section{Approach}
+
+\todo{TODO}
 
 \section{Results}
-\todo{Main estimates; dynamics around redistricting events; heterogeneity by
-party, seniority, and magnitude of PVI change.}
 
-\section{Robustness}
-\todo{Alternative outcome definitions; placebo dates; excluding
-court-overturned maps (NY, OH); sensitivity to sample restrictions.}
-
-\section{Discussion and Conclusion}
-\todo{Interpretation, limitations, and directions for future work.}
+\todo{TODO}
 
 \end{document}
