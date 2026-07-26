@@ -51,6 +51,7 @@ activations <- sparseMatrix(
 )
 rownames(activations) <- ids
 colnames(activations) <- paste0("act_", 1:D)
+
 dataset_acts <- activations[dataset[, tweet_id], ]
 
 # filtering activations
@@ -88,7 +89,6 @@ for (i in 1:num_chunks) {
 
 dataset_acts <- dataset_acts[, keep]
 print(paste0("Kept ", length(keep), " of ", D, " activations"))
-saveRDS(keep, file.path(PATH, "keep.rds"))
 
 # tweet-level regressions
 n_keep <- ncol(dataset_acts)

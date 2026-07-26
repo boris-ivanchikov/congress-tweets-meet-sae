@@ -2,7 +2,7 @@ import subprocess, sys, os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 REPO = "ivanchikovboris/congress-tweets-meet-sae"
-FOLDERS = ["data", "sae/runs"]
+FOLDERS = ["data", "sae/runs", "interpretation/runs"]
 
 def main():
     if len(sys.argv) != 2 or sys.argv[1] not in ("push", "pull"):

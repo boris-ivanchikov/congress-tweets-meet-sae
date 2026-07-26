@@ -25,7 +25,8 @@ dependencies = [
     "tensorboard",
     "torch-tb-profiler",
     "unique-namer",
-    "py-spy"
+    "py-spy",
+    "openai"
 ]
 
 [tool.uv]

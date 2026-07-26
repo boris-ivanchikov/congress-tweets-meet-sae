@@ -1,152 +1,32 @@
+"""Render SAE feature activations as a tabbed HTML report.
+
+Reads a trained SAE run directory (read-only input); artifacts are read from and
+written to the mirrored interpretation/runs/<run-name>/ directory.
+Auto-interpretation labels come from interpretations.csv (see autointerp.py);
+token-level attribution is computed here by occlusion (needs the embedding model).
+"""
+
 import os
-import re
-import sys
 import json
 import html
-import random
-import zipfile
 import argparse
 from itertools import zip_longest
 from concurrent.futures import ThreadPoolExecutor
 
-import h5py
 import numpy as np
-from numpy.lib import format as npy_format
-import scipy.sparse
 import pandas as pd
 import jinja2
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common import (MODEL, Activations, align_to_tweets, artifacts_dir, read_threshold,
+                    compute_preacts, human_date)
 from sae.model import init_sae
 
-MODEL = "Qwen/Qwen3-Embedding-8B"
-EMBEDDINGS = "data/embeddings.npz"
 MAX_LENGTH = 100
 OCCLUSION_BATCH = 64
-PREACT_BATCH = 200_000
 ATTR_REF_QUANTILE = 0.99
 ATTR_ACTIVATION_GAMMA = 1.0
 QUARTILE_LABELS = {1: "Q1 — strongest activation", 2: "Q2", 3: "Q3", 4: "Q4 — weakest activation"}
-
-AUTOINTERP_MODEL = "Qwen/Qwen3-32B"
-AUTOINTERP_N_EXAMPLES = 25
-AUTOINTERP_MAX_TWEET_CHARS = 280
-AUTOINTERP_MAX_NEW_TOKENS = 512
-AUTOINTERP_SCORE_PER_CLASS = 16
-
-INTERP_SYSTEM = (
-    "You are a meticulous AI interpretability researcher studying features of a sparse autoencoder "
-    "trained on embeddings of whole tweets from United States members of Congress. Each feature "
-    "activates on one shared property of a tweet: a topic, event, named entity, policy area, "
-    "rhetorical style, or recurring phrase.\n\n"
-    "You will be shown the tweets that most strongly activate a single feature. Describe the "
-    "property that is common to the examples.\n\n"
-    "Guidelines:\n"
-    "- Explain the pattern shared by MOST of the examples, not a detail present in only one or two. "
-    "Do NOT over-anchor on a single vivid or attention-grabbing word; identify the general category "
-    "that accounts for the whole set. (Illustration: if most examples mention a cat, a dog, and a "
-    "hamster, the property is 'pets', even if one example also happens to mention a tarantula.)\n"
-    "- Be as specific as the evidence supports, and no more. (Illustration: if the examples describe "
-    "rain, snow, and wind, the property is 'weather' — not the narrower 'snowstorms' that only a few "
-    "show, nor the vaguer 'nature'.)\n"
-    "- Base your answer only on the tweet text. Be concise and politically neutral. Do not make a "
-    "list of possible explanations.\n\n"
-    "Reason briefly in this order, then stop:\n"
-    "1. What stands out across the tweets.\n"
-    "2. The pattern shared by most of them.\n"
-    "3. Your final answer.\n\n"
-    "The LAST line of your response must be a single JSON object and nothing after it:\n"
-    '{"label": "<3-6 word noun phrase>", "explanation": "<1-2 sentences>"}'
-)
-
-SCORE_SYSTEM = (
-    "You are a meticulous AI interpretability researcher. You are given a description of a feature "
-    "(for example 'male pronouns' or 'support for Ukraine military aid') and a numbered list of "
-    "tweets. For each tweet, decide whether it genuinely exhibits the described property.\n\n"
-    "Judge STRICTLY: mark a tweet 1 only if it actually matches the description, not merely because "
-    "it shares a word or broad topic with it; otherwise mark 0.\n\n"
-    "Return only a JSON array of integers (1 for match, 0 for no match), one per tweet, in order, "
-    "and nothing else. Example: [1,0,0,1,0]"
-)
-
-
-def load_activations(path):
-    with h5py.File(os.path.join(path, "activations.h5"), "r") as f:
-        mat = scipy.sparse.csc_matrix(
-            (f["data"][:], f["indices"][:], f["indptr"][:]),
-            shape=f.attrs["shape"][:],
-        )
-        ids = f["ids"][:]
-    return ids, mat
-
-
-def align_to_tweets(col, act_ids, tweet_ids):
-    row_of_id = pd.Series(np.arange(len(act_ids)), index=act_ids)
-    rows = row_of_id.reindex(tweet_ids).to_numpy()
-    return col[rows]
-
-
-def load_sae(run_path, device):
-    import torch
-
-    with open(os.path.join(run_path, "config.json")) as f:
-        config = json.load(f)
-    sae = init_sae(config["model"]).to(device)
-    sae.load_state_dict(torch.load(os.path.join(run_path, "weights.pt"), weights_only=False))
-    sae.eval()
-    return sae
-
-
-def read_threshold(run_path):
-    import torch
-
-    sd = torch.load(os.path.join(run_path, "weights.pt"), weights_only=False, map_location="cpu")
-    return float(sd["threshold"]) if "threshold" in sd else 0.0
-
-
-def embeddings_memmap(path=EMBEDDINGS):
-    zi = zipfile.ZipFile(path).getinfo("embeddings.npy")
-    with open(path, "rb") as fh:
-        fh.seek(zi.header_offset)
-        head = fh.read(30)
-        fnl = int.from_bytes(head[26:28], "little")
-        efl = int.from_bytes(head[28:30], "little")
-        fh.seek(zi.header_offset + 30 + fnl + efl)
-        version = npy_format.read_magic(fh)
-        readers = {(1, 0): npy_format.read_array_header_1_0, (2, 0): npy_format.read_array_header_2_0}
-        shape, fortran, dtype = readers[version](fh)
-        offset = fh.tell()
-    return np.memmap(path, mode="r", dtype=dtype, offset=offset, shape=shape)
-
-
-def compute_preacts(run_path, feature_ids):
-    import torch
-
-    with np.load(EMBEDDINGS) as data:
-        pre_ids = data["ids"][:]
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sae = load_sae(run_path, device)
-    with torch.no_grad():
-        idx = torch.tensor([f - 1 for f in feature_ids], device=device)
-        w_sub = sae.w_enc.weight[idx].float()
-        b_sub = sae.b_enc[idx].float()
-        b_pre = sae.b_pre.float()
-        mm = embeddings_memmap()
-        n = mm.shape[0]
-        out = np.empty((n, len(feature_ids)), dtype=np.float32)
-        for s in tqdm(range(0, n, PREACT_BATCH), desc="Pre-activations"):
-            e = min(s + PREACT_BATCH, n)
-            x = torch.from_numpy(np.array(mm[s:e])).to(device).float()
-            out[s:e] = ((x - b_pre) @ w_sub.T + b_sub).cpu().numpy()
-    del sae
-
-    return pre_ids, {f: out[:, k] for k, f in enumerate(feature_ids)}
-
-
-def human_date(value):
-    return str(value)[:16]
 
 
 def pick_tweets(tweets_df, activations, n):
@@ -445,7 +325,7 @@ TEMPLATE = jinja2.Template("""<!DOCTYPE html>
         <p class="ai-kicker">Auto-interpretation</p>
         <p class="ai-label">{{ f.autointerp.label }}</p>
         <p class="ai-expl">{{ f.autointerp.explanation }}</p>
-        <p class="ai-meta">{% if f.autointerp.score is not none %}detection acc {{ f.autointerp.score }} ({{ f.autointerp.n_pos + f.autointerp.n_neg }} held-out) &middot; {% endif %}{{ f.autointerp.n_examples }} examples &middot; {{ f.autointerp.model }}</p>
+        <p class="ai-meta">{{ f.autointerp.meta }}</p>
       </div>
       {% endif %}
       <p class="stat">Activates on <b>{{ f.summary.n_act }}</b> / {{ f.summary.total }} tweets ({{ f.summary.pct }})</p>
@@ -677,17 +557,50 @@ def render_report(run, features_raw, attr_map):
     return TEMPLATE.render(run=run, features=features, attributed=attr_map is not None, chart_json=chart_json)
 
 
+def load_interpretations(csv_path, model=None):
+    """feature -> autointerp dict from interpret.py output (preferring `model` if given)."""
+    if not os.path.exists(csv_path):
+        return {}
+    df = pd.read_csv(csv_path)
+    if model:
+        df = df[df["model"] == model]
+    out = {}
+    for _, row in df.drop_duplicates("feature", keep="last").iterrows():
+        meta = []
+        if pd.notna(row.get("type")):
+            meta.append(str(row["type"]))
+        if pd.notna(row.get("score")):
+            ci = ""
+            if pd.notna(row.get("score_lo")):
+                ci = f" [{row['score_lo']:.2f}, {row['score_hi']:.2f}]"
+            meta.append(f"detection acc {row['score']}{ci} "
+                        f"({int(row['n_pos']) + int(row['n_neg'])} held-out)")
+        if pd.notna(row.get("score_weighted")):
+            meta.append(f"act-weighted {row['score_weighted']}")
+        meta.append(f"{int(row['n_examples'])} examples")
+        meta.append(str(row["model"]))
+        out[int(row["feature"])] = {
+            "label": row["label"],
+            "explanation": row["explanation"] if pd.notna(row["explanation"]) else "",
+            "meta": " · ".join(meta),
+        }
+    return out
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Render SAE feature activations as a tabbed HTML report.")
-    parser.add_argument("--path", type=str, required=True, help="Path to run directory")
+    parser.add_argument("--path", type=str, required=True,
+                        help="Path to trained SAE run directory (read-only input)")
     parser.add_argument("--features", nargs="+", type=int, required=True, help="Feature indices (1-indexed)")
     parser.add_argument("--n", type=int, default=5, help="Activating tweets sampled per quartile (4*n total)")
-    parser.add_argument("--out", type=str, default=None, help="Output HTML path (default: <path>/report.html)")
+    parser.add_argument("--out", type=str, default=None,
+                        help="Output HTML path (default: interpretation/runs/<run>/report.html)")
     parser.add_argument("--token-attr", action="store_true", help="Color tokens by occlusion attribution")
-    parser.add_argument("--autointerp", action="store_true", help="Generate a local-LLM interpretation per feature")
-    parser.add_argument("--autointerp-model", type=str, default=AUTOINTERP_MODEL, help="HF model id for autointerp")
-    parser.add_argument("--autointerp-examples", type=int, default=AUTOINTERP_N_EXAMPLES,
-                        help="Top-K strongest distinct tweets fed to the LLM")
+    parser.add_argument("--interpretations", type=str, default=None,
+                        help="interpretations.csv from autointerp.py "
+                             "(default: interpretation/runs/<run>/interpretations.csv)")
+    parser.add_argument("--interp-model", type=str, default=None,
+                        help="Which model's interpretations to display (default: last per feature)")
     return parser.parse_args()
 
 
@@ -703,228 +616,39 @@ def build_summary(act_col, preact_col, handles):
     }
 
 
-_RT_PREFIX = re.compile(r"^RT @\w+:\s*", re.IGNORECASE)
-_URL = re.compile(r"https?://\S+")
-_WS = re.compile(r"\s+")
-
-
-def normalize_for_dedup(text):
-    t = _RT_PREFIX.sub("", text)
-    t = _URL.sub("", t)
-    return _WS.sub(" ", t.lower()).strip()
-
-
-def select_interp_examples(texts, k, max_chars):
-    seen, out = set(), []
-    for text in texts:
-        t = str(text).strip()
-        norm = normalize_for_dedup(t)
-        if not norm or norm in seen:
-            continue
-        seen.add(norm)
-        out.append(t[:max_chars])
-        if len(out) >= k:
-            break
-    return out, seen
-
-
-def _take_distinct(indices, texts, seen, max_chars, k):
-    out = []
-    for j in indices:
-        t = str(texts[j]).strip()
-        norm = normalize_for_dedup(t)
-        if not norm or norm in seen:
-            continue
-        seen.add(norm)
-        out.append(t[:max_chars])
-        if len(out) >= k:
-            break
-    return out
-
-
-def select_score_pool(act_col, preact_col, texts, exclude_norms, n, max_chars, seed):
-    rng = random.Random(seed)
-    seen = set(exclude_norms)
-
-    # positives: held-out activating tweets spread across the full activation-strength range
-    act_order = np.argsort(-act_col)
-    n_act = int((act_col > 0).sum())
-    positives = []
-    if n_act:
-        cand = act_order[np.linspace(0, n_act - 1, min(n_act, n * 8)).round().astype(int)]
-        held = _take_distinct(cand, texts, seen, max_chars, len(cand))
-        if len(held) > n:
-            positives = [held[i] for i in np.linspace(0, len(held) - 1, n).round().astype(int)]
-        else:
-            positives = held
-
-    # negatives, balanced to #positives: half HARD (non-activating but nearest the threshold),
-    # half random non-activating — so accuracy isn't inflated by trivially-different negatives
-    target = len(positives)
-    nonact = np.where(act_col == 0)[0]
-    negatives = []
-    if len(nonact) and target:
-        n_hard = target // 2
-        k = min(len(nonact), n_hard * 4)
-        hard_local = np.argpartition(-preact_col[nonact], k - 1)[:k]
-        hard = nonact[hard_local[np.argsort(-preact_col[nonact][hard_local])]]
-        negatives = _take_distinct(hard, texts, seen, max_chars, n_hard)
-
-        rand_local = rng.sample(range(len(nonact)), min(len(nonact), target * 4))
-        negatives += _take_distinct(nonact[rand_local], texts, seen, max_chars, target - len(negatives))
-    return positives, negatives
-
-
-def build_interp_messages(examples):
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(examples))
-    user = (f"Here are {len(examples)} tweets that most strongly activate this SAE feature, "
-            f"in no particular order:\n\n{numbered}\n\n"
-            "What single concept does this feature represent? Reply with only the JSON object.")
-    return [{"role": "system", "content": INTERP_SYSTEM}, {"role": "user", "content": user}]
-
-
-def build_score_messages(explanation, texts):
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
-    user = (f"Concept: {explanation}\n\nTweets:\n{numbered}\n\n"
-            f"Reply with a JSON array of {len(texts)} integers (0 or 1), one per tweet in order.")
-    return [{"role": "system", "content": SCORE_SYSTEM}, {"role": "user", "content": user}]
-
-
-def parse_interp_output(raw):
-    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-            label = str(obj.get("label", "")).strip()
-            explanation = str(obj.get("explanation", "")).strip()
-            if label:
-                return label[:80], explanation
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            pass
-    lines = [l for l in text.splitlines() if l.strip()]
-    return (lines[0].strip()[:80] if lines else "(uninterpretable)",
-            " ".join(l.strip() for l in lines[1:]).strip())
-
-
-def parse_score_output(raw, n):
-    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    m = re.search(r"\[[\s\S]*?\]", text)
-    if m:
-        try:
-            nums = [int(x) for x in json.loads(m.group(0))]
-        except (json.JSONDecodeError, ValueError, TypeError):
-            nums = [int(x) for x in re.findall(r"[01]", m.group(0))]
-    else:
-        nums = [int(x) for x in re.findall(r"[01]", text)]
-    nums = [1 if x else 0 for x in nums][:n]
-    return nums if len(nums) == n else None
-
-
-class FeatureInterpreter:
-    def __init__(self, model_id):
-        import torch
-        import transformers
-
-        self.torch = torch
-        self.model_id = model_id
-
-        n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        print(f"Loading {model_id} for autointerp (fp16, device_map=auto across {n_gpu} GPU(s))...")
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
-        self.model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_id, dtype=torch.float16, device_map="auto"
-        )
-        self.model.eval()
-        self.input_device = self.model.get_input_embeddings().weight.device
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-    def _generate(self, messages, max_new_tokens):
-        torch = self.torch
-        try:
-            prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-        except TypeError:
-            prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True)
-        enc = self.tokenizer(prompt, return_tensors="pt").to(self.input_device)
-        with torch.inference_mode():
-            out = self.model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
-                                      pad_token_id=self.tokenizer.pad_token_id)
-        gen = out[0, enc["input_ids"].shape[1]:]
-        return self.tokenizer.decode(gen, skip_special_tokens=True)
-
-    def _score(self, explanation, positives, negatives, feature_id):
-        items = [(t, 1) for t in positives] + [(t, 0) for t in negatives]
-        random.Random(feature_id).shuffle(items)
-        texts = [t for t, _ in items]
-        labels = [l for _, l in items]
-        raw = self._generate(build_score_messages(explanation, texts), len(texts) * 3 + 32)
-        preds = parse_score_output(raw, len(texts))
-        if preds is None:
-            return None
-        return round(sum(int(p == l) for p, l in zip(preds, labels)) / len(labels), 3)
-
-    def interpret(self, feature_id, examples, positives, negatives):
-        if not examples:
-            return {"label": "(no activating tweets)",
-                    "explanation": "This feature did not activate on any tweet in the corpus.",
-                    "score": None, "n_examples": 0, "n_pos": 0, "n_neg": 0, "model": self.model_id}
-
-        label, explanation = parse_interp_output(
-            self._generate(build_interp_messages(examples), AUTOINTERP_MAX_NEW_TOKENS))
-        score = None
-        if explanation and positives and negatives:
-            score = self._score(explanation, positives, negatives, feature_id)
-        return {"label": label, "explanation": explanation, "score": score,
-                "n_examples": len(examples), "n_pos": len(positives), "n_neg": len(negatives),
-                "model": self.model_id}
-
-
 def main(args):
+    out_dir = artifacts_dir(args.path)
     tweets_df = pd.read_csv("data/tweets.csv")
-    act_ids, mat = load_activations(args.path)
+    acts = Activations(args.path)
     tweet_ids = tweets_df["tweet_id"].to_numpy()
     handles = tweets_df["twitter"].astype(str).to_numpy()
 
     print("Computing pre-activations...")
     pre_ids, preacts = compute_preacts(args.path, args.features)
     threshold = read_threshold(args.path)
-    texts = tweets_df["text"].to_numpy()
+
+    interp_csv = args.interpretations or os.path.join(out_dir, "interpretations.csv")
+    interps = load_interpretations(interp_csv, args.interp_model)
 
     features_raw = []
     for feature in args.features:
-        full_act = mat[:, feature - 1].toarray().flatten()
+        full_act = acts.col(feature)
         preact_full = preacts[feature]
         attr_ref = float(np.quantile(np.abs(preact_full - threshold), ATTR_REF_QUANTILE))
         summary = build_summary(
-            align_to_tweets(full_act, act_ids, pre_ids),
+            align_to_tweets(full_act, acts.ids, pre_ids),
             preact_full,
             align_to_tweets(handles, tweet_ids, pre_ids),
         )
 
-        act_col = align_to_tweets(full_act, act_ids, tweet_ids)
+        act_col = align_to_tweets(full_act, acts.ids, tweet_ids)
         preact_col = align_to_tweets(preact_full, pre_ids, tweet_ids)
         work_df = tweets_df.assign(preact=preact_col)
         active, not_active = pick_tweets(work_df, act_col, args.n)
 
-        examples, score_pos, score_neg = [], [], []
-        if args.autointerp:
-            top_texts = []
-            for j in np.argsort(-act_col):
-                if act_col[j] <= 0:
-                    break
-                top_texts.append(texts[j])
-                if len(top_texts) >= 4 * args.autointerp_examples:
-                    break
-            examples, ex_norms = select_interp_examples(top_texts, args.autointerp_examples, AUTOINTERP_MAX_TWEET_CHARS)
-            score_pos, score_neg = select_score_pool(
-                act_col, preact_col, texts, ex_norms, AUTOINTERP_SCORE_PER_CLASS, AUTOINTERP_MAX_TWEET_CHARS, feature)
-
         features_raw.append({"id": feature, "active": active, "not_active": not_active,
                              "summary": summary, "threshold": threshold, "attr_ref": attr_ref,
-                             "interp_examples": examples, "score_pos": score_pos, "score_neg": score_neg})
+                             "autointerp": interps.get(feature)})
         print(f"Feature {feature}: {len(active)} activating, {len(not_active)} non-activating")
 
     attr_map = None
@@ -938,24 +662,12 @@ def main(args):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    if args.autointerp:
-        interp = FeatureInterpreter(args.autointerp_model)
-        for f in tqdm(features_raw, desc="Auto-interp"):
-            f["autointerp"] = interp.interpret(f["id"], f["interp_examples"], f["score_pos"], f["score_neg"])
-        del interp
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    out_path = args.out or os.path.join(args.path, "report.html")
+    out_path = args.out or os.path.join(out_dir, "report.html")
     with open(out_path, "w") as f:
         f.write(render_report(args.path, features_raw, attr_map))
     print(f"Wrote {out_path}")
 
 
 if __name__ == "__main__":
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    os.chdir(root)
-
-    args = parse_args()
-    main(args)
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    main(parse_args())

@@ -2,6 +2,7 @@ explore.ipynb
 __pycache__
 /data
 /sae/runs
+/interpretation/runs
 /.venv
 *.aux
 *.log
