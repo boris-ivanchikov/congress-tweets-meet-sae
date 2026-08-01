@@ -15,7 +15,6 @@ non-activating negatives.
 import os
 import re
 import json
-import math
 import time
 import random
 import argparse
@@ -37,50 +36,52 @@ PRICES = {
     "deepseek-v4-pro": (0.435, 0.003625, 0.87),
 }
 
-N_EXAMPLES = 25
+N_EXAMPLES = 15
 TOP_FRACTION = 0.4          # share of examples taken from the very top of the range
 AUTHOR_CAP = 2              # max examples per twitter handle
 MAX_TWEET_CHARS = 280
-SCORE_PER_CLASS = 50
-SCORE_CHUNK = 25            # tweets per scoring request
-INTERP_MAX_TOKENS = 4096    # includes reasoning when thinking is enabled
+SCORE_PER_CLASS = 10
+INTERP_MAX_TOKENS = 512
+INTERP_THINKING_MAX_TOKENS = 4096
 
 INTERP_SYSTEM = (
-    "You are a meticulous AI interpretability researcher studying features of a sparse autoencoder "
-    "trained on embeddings of whole tweets from United States members of Congress. Each feature "
-    "activates on one shared property of a tweet: a topic, event, named entity, policy area, "
-    "rhetorical style, recurring phrase, or the presence of a specific word or token.\n\n"
-    "You will be shown tweets that activate a single feature, sorted by activation strength "
-    "(strongest first). Each tweet is prefixed with its activation value. The strongest activators "
-    "come first, followed by tweets sampled evenly across the rest of the activation range — your "
-    "description must account for the weaker examples too, not just the vivid top ones.\n\n"
-    "Guidelines:\n"
-    "- Explain the pattern shared by MOST of the examples, not a detail present in only one or two. "
-    "Do NOT over-anchor on a single vivid or attention-grabbing word; identify the general category "
-    "that accounts for the whole set. (Illustration: if most examples mention a cat, a dog, and a "
-    "hamster, the property is 'pets', even if one example also happens to mention a tarantula.)\n"
-    "- Be as specific as the evidence supports, and no more. (Illustration: if the examples describe "
-    "rain, snow, and wind, the property is 'weather' — not the narrower 'snowstorms' that only a few "
-    "show, nor the vaguer 'nature'.)\n"
-    "- Some features are lexical rather than topical: they fire on a specific word, phrase, hashtag, "
-    "or @-handle across otherwise unrelated topics. If the examples share a word or token but not a "
-    "topic, say so plainly.\n"
-    "- Base your answer only on the tweet text. Be concise and politically neutral. Do not make a "
-    "list of possible explanations.\n\n"
-    "Respond with a single JSON object and nothing else:\n"
-    '{"label": "<3-6 word noun phrase>", "type": "<category>", "explanation": "<1-2 sentences>"}\n\n'
-    "Formatting of the three fields:\n"
-    "- label: all lowercase except proper nouns and acronyms; no trailing period.\n"
-    "- type: exactly one of \"topic\" (a subject or policy area), \"entity\" (a specific person, "
-    "organization, place, or event), \"lexical\" (a specific word, phrase, hashtag, handle, or "
-    "character sequence regardless of topic), \"style\" (a tone, sentiment, rhetorical form, or "
-    "format such as congratulations or lists), \"other\" (none of the above fits).\n"
-    "- explanation: 1-2 plain declarative sentences stating the property itself, in general terms "
-    "that would hold for any tweet with that property (illustration of the style: 'Tweets "
-    "congratulating a local sports team on a victory.' or 'The word \"bridge\" in any context.'). "
-    "Never write 'this feature activates on'; never describe the evidence or activation strengths "
-    "(no 'the strongest examples...', 'weaker activations...'); do not reference or quote the "
-    "specific tweets that were shown."
+    "Task\n"
+    "Interpret one feature of a sparse autoencoder trained on embeddings of congressional tweets. "
+    "You will receive activating tweets sorted from strongest to weakest, with activation values. "
+    "Infer the single property best represented by the feature.\n\n"
+    "Activation types\n"
+    "Choose exactly one type. The examples below are fabricated and are not evaluation data.\n"
+    "- topic: a recurring subject, activity, or policy domain. Example: tweets about coral bleaching, "
+    "reef restoration, and ocean warming represent the topic 'coral reef conservation'.\n"
+    "- entity: one specific person, organization, place, event, or named program. Example: tweets about "
+    "performances at, renovations to, and directions to Maple Hall represent the entity 'Maple Hall'.\n"
+    "- lexical: the same word, phrase, hashtag, handle, or character sequence used across otherwise "
+    "unrelated meanings or subjects. Example: 'seal the envelope', 'a harbor seal', and 'the official "
+    "seal' represent the lexical item 'seal'.\n"
+    "- style: a recurring tone, communicative purpose, rhetorical form, or layout. Example: several "
+    "questions challenging a decision represent the style 'rhetorical questions'.\n"
+    "- other: a stable property that does not fit the four types above. Example: tweets written "
+    "primarily in Spanish represent the other property 'Spanish-language text'.\n\n"
+    "Special instructions\n"
+    "- Treat the strongest activators as the primary evidence. Use the weaker activation tail to refine "
+    "the boundary, but allow very weak activations to be noise; do not let them outvote a clear strong "
+    "pattern.\n"
+    "- Choose the narrowest interpretation supported by several strong examples. Do not anchor on a "
+    "detail found in only one or two examples, and do not broaden a coherent pattern unnecessarily.\n"
+    "- A repeated word is not automatically lexical. Choose lexical only when the shared surface form "
+    "persists across semantically unrelated contexts. If the surrounding tweets concern the same "
+    "real-world subject or referent, choose topic or entity even when they repeat the same terminology.\n"
+    "- Base the interpretation only on the tweet text. Be concise and politically neutral. Give one "
+    "interpretation, not a list of alternatives.\n\n"
+    "Output format\n"
+    "Return one JSON object and nothing else:\n"
+    '{"analysis": "<reasoning>", "label": "<3-6 word noun phrase>", '
+    '"type": "<topic|entity|lexical|style|other>", "explanation": "<1-2 sentences>"}\n'
+    "- analysis: at most 100 words. Identify the strongest coherent signal, use the weaker examples to "
+    "check its scope, and justify the selected type. Do not quote tweets.\n"
+    "- label: lowercase except proper nouns and acronyms; no trailing period.\n"
+    "- explanation: state the general property directly. Do not mention features, examples, evidence, "
+    "or activation strengths, and do not quote the supplied tweets."
 )
 
 SCORE_SYSTEM = (
@@ -246,16 +247,6 @@ def parse_score_output(raw, n):
     return nums if len(nums) == n else None
 
 
-def wilson_ci(k, n, z=1.96):
-    if not n:
-        return None, None
-    p = k / n
-    d = 1 + z * z / n
-    center = (p + z * z / (2 * n)) / d
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
-    return max(0.0, center - half), min(1.0, center + half)
-
-
 # ---------------------------------------------------------------- API client
 
 class DeepSeekClient:
@@ -288,16 +279,18 @@ class DeepSeekClient:
         miss_p, hit_p, out_p = PRICES[self.model]
         return (miss * miss_p + hit * hit_p + u.completion_tokens * out_p) / 1e6
 
-    def chat(self, messages, max_tokens, thinking):
+    def chat(self, messages, max_tokens, thinking, json_object=False):
         """Returns (text, $ spent on this call including retries)."""
         if self.cost() >= self.max_cost:
             raise RuntimeError(f"cost cap ${self.max_cost} reached for {self.model}")
         last_exc, spent = None, 0.0
         for attempt in range(5):
             try:
+                kwargs = {"response_format": {"type": "json_object"}} if json_object else {}
                 r = self.client.chat.completions.create(
                     model=self.model, messages=messages, stream=False, max_tokens=max_tokens,
                     extra_body={"thinking": {"type": "enabled" if thinking else "disabled"}},
+                    **kwargs,
                 )
                 spent += self._record(r.usage)
                 choice = r.choices[0]
@@ -306,7 +299,7 @@ class DeepSeekClient:
                     # reasoning ate the whole budget before any answer was emitted
                     max_tokens *= 2
                     continue
-                if not text:
+                if not text and not json_object:
                     # the answer sometimes lands in reasoning_content with empty content
                     text = (getattr(choice.message, "reasoning_content", None) or "").strip()
                 return text, spent
@@ -318,46 +311,40 @@ class DeepSeekClient:
 
 # ---------------------------------------------------------------- per-feature job
 
-def interpret_feature(client, feature, examples, n_top, positives, negatives, thinking_score):
+def interpret_feature(client, feature, examples, n_top, positives, negatives,
+                      thinking_interp=False):
     if not examples:
         return {"label": "(no activating tweets)", "type": "other", "explanation": "",
-                "score": None, "score_weighted": None, "score_lo": None, "score_hi": None,
+                "score": None, "score_weighted": None,
                 "n_pos": 0, "n_neg": 0, "cost_usd": 0.0}
 
     cost, parsed = 0.0, None
+    max_tokens = INTERP_THINKING_MAX_TOKENS if thinking_interp else INTERP_MAX_TOKENS
     for _ in range(3):
-        raw, spent = client.chat(build_interp_messages(examples, n_top), INTERP_MAX_TOKENS,
-                                 thinking=True)
+        raw, spent = client.chat(build_interp_messages(examples, n_top), max_tokens,
+                                 thinking=thinking_interp, json_object=True)
         cost += spent
         parsed = parse_interp_output(raw)
         if parsed:
             break
     if parsed is None:
         return {"label": "(parse failed)", "type": "other", "explanation": "",
-                "score": None, "score_weighted": None, "score_lo": None, "score_hi": None,
+                "score": None, "score_weighted": None,
                 "n_pos": 0, "n_neg": 0, "cost_usd": round(cost, 6)}
     label, ftype, explanation = parsed
 
-    score = score_weighted = lo = hi = None
+    score = score_weighted = None
     if explanation and positives and negatives:
         items = [(t, 1, a) for t, a in positives] + [(t, 0, 0.0) for t in negatives]
         random.Random(feature).shuffle(items)
-        correct, judged, records = 0, 0, []
-        for s in range(0, len(items), SCORE_CHUNK):
-            chunk = items[s:s + SCORE_CHUNK]
-            texts = [t for t, _, _ in chunk]
-            raw, spent = client.chat(build_score_messages(explanation, texts),
-                                     len(texts) * 3 + 64, thinking=thinking_score)
-            cost += spent
-            preds = parse_score_output(raw, len(texts))
-            if preds is None:
-                continue
-            correct += sum(int(p == l) for p, (_, l, _) in zip(preds, chunk))
-            judged += len(chunk)
-            records += [(l, a, int(p == l)) for p, (_, l, a) in zip(preds, chunk)]
-        if judged:
-            score = round(correct / judged, 3)
-            lo, hi = wilson_ci(correct, judged)
+        texts = [t for t, _, _ in items]
+        raw, spent = client.chat(build_score_messages(explanation, texts),
+                                 len(texts) * 3 + 64, thinking=False)
+        cost += spent
+        preds = parse_score_output(raw, len(texts))
+        if preds is not None:
+            records = [(l, a, int(p == l)) for p, (_, l, a) in zip(preds, items)]
+            score = round(sum(c for _, _, c in records) / len(records), 3)
             # balanced accuracy with positives weighted by activation strength:
             # high when the label fits the strong activators even if the weak tail drifts
             pos = [(a, c) for l, a, c in records if l == 1]
@@ -370,8 +357,6 @@ def interpret_feature(client, feature, examples, n_top, positives, negatives, th
 
     return {"label": label, "type": ftype, "explanation": explanation,
             "score": score, "score_weighted": score_weighted,
-            "score_lo": None if lo is None else round(lo, 3),
-            "score_hi": None if hi is None else round(hi, 3),
             "n_pos": len(positives), "n_neg": len(negatives), "cost_usd": round(cost, 6)}
 
 
@@ -411,6 +396,8 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=None,
                         help="Only interpret the first X selected features")
     parser.add_argument("--n-examples", type=int, default=N_EXAMPLES)
+    parser.add_argument("--interp-thinking", action="store_true",
+                        help="Enable thinking for interpretation (disabled by default)")
     parser.add_argument("--no-score", action="store_true", help="Skip detection scoring")
     parser.add_argument("--score-per-class", type=int, default=SCORE_PER_CLASS)
     parser.add_argument("--out", type=str, default=None,
@@ -471,7 +458,8 @@ def main(args):
     def work(j):
         try:
             res = interpret_feature(client, j["feature"], j["examples"], j["n_top"],
-                                    j["positives"], j["negatives"], thinking_score=False)
+                                    j["positives"], j["negatives"],
+                                    thinking_interp=args.interp_thinking)
             append_row({"feature": j["feature"], "model": MODEL, **res,
                         "n_examples": len(j["examples"]), "n_activating": j["n_act"],
                         "pct_activating": round(j["pct_act"], 4)})

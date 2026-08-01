@@ -7,7 +7,7 @@ library(stats)
 setFixest_nthreads(0)
 setFixest_notes(FALSE)
 
-PATH <- "sae/runs/convenient-advertising-92/"
+PATH <- "sae/runs/cynical-credit-37"
 
 # data selection
 START_DATE <- as.Date("2019-01-03") # 116th Congress start
@@ -56,84 +56,66 @@ dataset_acts <- activations[dataset[, tweet_id], ]
 
 # filtering activations
 MIN_NUM_REPS <- 50
-MIN_PCT_ACTS <- 0.1
-MAX_PCT_ACTS <- 10.0
+MIN_PCT_ACTS <- 0.01
 
-chunk_size <- 100
-num_chunks <- D %/% chunk_size + (D %% chunk_size > 0)
-
-pb <- progress_bar$new(
-  format = " Filtering Activations [:bar] :percent | ETA: :eta | Step :current/:total",
-  total = num_chunks,
-  clear = FALSE,
-  width = 120
+dataset[, tweet_idx := .I]
+dataset[, rep_idx := .GRP, by = bioguide]
+G = sparseMatrix(
+    i = dataset[, rep_idx],
+    j = dataset[, tweet_idx],
+    x = 1
 )
-
-keep <- integer(0)
-for (i in 1:num_chunks) {
-    start <- (i - 1) * chunk_size + 1
-    end <- min(i * chunk_size, D)
-    chunk_idx <- start:end
-
-    pos <- as.matrix(dataset_acts[, chunk_idx]) > 0
-    num_acts <- colSums(pos)
-    num_reps <- sapply(seq_along(chunk_idx), \(j) uniqueN(dataset$bioguide[pos[, j]]))
-
-    keep <- c(keep, chunk_idx[
-      num_reps > MIN_NUM_REPS
-      & num_acts > N * MIN_PCT_ACTS / 100  
-      & num_acts < N * MAX_PCT_ACTS / 100
-    ])
-    pb$tick()
-}
-
+rep_acts <- G %*% (dataset_acts > 0)
+keep <- (colSums(dataset_acts > 0) >= nrow(dataset_acts) * MIN_PCT_ACTS) & (colSums(rep_acts > 0) >= MIN_NUM_REPS)
+keep_names <- colnames(activations)[keep]
 dataset_acts <- dataset_acts[, keep]
-print(paste0("Kept ", length(keep), " of ", D, " activations"))
+print(paste0("Kept ", sum(keep), " of ", D, " activations"))
 
-# tweet-level regressions
-n_keep <- ncol(dataset_acts)
-result <- data.table(orig_idx = keep)
+# aggregating by representative-month
+dataset[, rep_ym_idx := .GRP, by = .(bioguide, posted_ym, post)]
 
-chunk_size <- 100
-num_chunks <- n_keep %/% chunk_size + (n_keep %% chunk_size > 0)
+G = sparseMatrix(
+    i = dataset[, rep_ym_idx],
+    j = dataset[, tweet_idx],
+    x = 1
+)
+grouped_acts = G %*% dataset_acts / rowSums(G)
 
-pb <- progress_bar$new(
-  format = " Fitting Regressions [:bar] :percent | ETA: :eta | Step :current/:total",
-  total = num_chunks,
-  clear = FALSE,
-  width = 120
+grouped_dataset <- dataset[, .(
+    n_tweets = .N,
+    party = party[1],
+    ran_for_reelection = ran_for_reelection[1],
+    pvi_change_relative = pvi_change_relative[1],
+    is_republican = is_republican[1]
+), by = .(bioguide, posted_ym, post)]
+
+grouped_dataset <- cbind(grouped_dataset, as.data.table(as.matrix(grouped_acts)))
+
+# running regressions
+n_keep <- sum(keep)
+result <- data.table(orig_idx = keep_names)
+
+fml <- as.formula(paste0(
+    "c(", paste(keep_names, collapse = ","), ") ~ post + post:pvi_change_relative + post:is_republican | bioguide + posted_ym"
+))
+models <- feols(
+    fml, 
+    data = grouped_dataset, 
+    weights = ~n_tweets, 
+    cluster = ~bioguide
 )
 
-for (i in 1:num_chunks) {
-    start <- (i - 1) * chunk_size + 1
-    end <- min(i * chunk_size, n_keep)
-
-    act_names <- colnames(dataset_acts)[start:end]
-    acts_chunk <- as.matrix(dataset_acts[, start:end])
-    colnames(acts_chunk) <- act_names
-
-    dt <- cbind(as.data.table(acts_chunk), dataset)
-
-    fml <- as.formula(paste0(
-        "c(", paste(act_names, collapse = ","), ") ~ post + post:pvi_change_relative + post:is_republican | bioguide + posted_ym"
-    ))
-
-    models <- feols(fml, data = dt, cluster = ~bioguide)
-
-    result[start:end, `:=`(
-        beta      = sapply(models, \(m) coef(m)["post:pvi_change_relative"]),
-        se        = sapply(models, \(m) se(m)["post:pvi_change_relative"]),
-        pval      = sapply(models, \(m) pvalue(m)["post:pvi_change_relative"]),
-        beta_post = sapply(models, \(m) coef(m)["post"]),
-        se_post   = sapply(models, \(m) se(m)["post"]),
-        pval_post = sapply(models, \(m) pvalue(m)["post"]),
-        beta_rep  = sapply(models, \(m) coef(m)["post:is_republican"]),
-        se_rep    = sapply(models, \(m) se(m)["post:is_republican"]),
-        pval_rep  = sapply(models, \(m) pvalue(m)["post:is_republican"]),
-        nobs      = sapply(models, nobs)
-    )]
-
-    pb$tick()
-}
+result[, `:=`(
+    beta      = sapply(models, \(m) coef(m)["post:pvi_change_relative"]),
+    se        = sapply(models, \(m) se(m)["post:pvi_change_relative"]),
+    pval      = sapply(models, \(m) pvalue(m)["post:pvi_change_relative"]),
+    beta_post = sapply(models, \(m) coef(m)["post"]),
+    se_post   = sapply(models, \(m) se(m)["post"]),
+    pval_post = sapply(models, \(m) pvalue(m)["post"]),
+    beta_rep  = sapply(models, \(m) coef(m)["post:is_republican"]),
+    se_rep    = sapply(models, \(m) se(m)["post:is_republican"]),
+    pval_rep  = sapply(models, \(m) pvalue(m)["post:is_republican"]),
+    nobs      = sapply(models, nobs)
+)]
 
 fwrite(result[order(pval)], file.path(PATH, "regressions.csv"))
