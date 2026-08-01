@@ -19,13 +19,13 @@ import time
 import random
 import argparse
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from common import Activations, align_to_tweets, artifacts_dir, normalize_for_dedup
+from common import Activations, artifacts_dir, normalize_for_dedup
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_KEY_PATH = "~/.deepseek/key"
@@ -97,16 +97,17 @@ SCORE_SYSTEM = (
 
 # ---------------------------------------------------------------- example selection
 
-def select_interp_examples(texts, handles, act_col, k, max_chars=MAX_TWEET_CHARS,
+def select_interp_examples(texts, handles, active_rows, active_values, k,
+                           max_chars=MAX_TWEET_CHARS,
                            author_cap=AUTHOR_CAP, top_frac=TOP_FRACTION):
     """Pick k distinct, author-capped (text, activation) examples: the strongest
-    activators first, then a sample spread evenly across the rest of the range."""
-    order = np.argsort(-act_col, kind="stable")
-    order = order[act_col[order] > 0]
+    activators first, then a sample spread evenly across the rest of the range.
+    active_rows and active_values must be sorted by descending activation."""
 
     seen, per_author, chosen = set(), {}, []
 
-    def take(j):
+    def take(i):
+        j = int(active_rows[i])
         t = str(texts[j]).strip()
         norm = normalize_for_dedup(t)
         h = str(handles[j])
@@ -114,24 +115,24 @@ def select_interp_examples(texts, handles, act_col, k, max_chars=MAX_TWEET_CHARS
             return False
         seen.add(norm)
         per_author[h] = per_author.get(h, 0) + 1
-        chosen.append((t[:max_chars], float(act_col[j])))
+        chosen.append((t[:max_chars], float(active_values[i])))
         return True
 
-    k = min(k, len(order))
+    k = min(k, len(active_rows))
     k_top = max(1, round(k * top_frac)) if k else 0
     i = 0
-    while i < len(order) and len(chosen) < k_top:
-        take(order[i])
+    while i < len(active_rows) and len(chosen) < k_top:
+        take(i)
         i += 1
     n_top = len(chosen)
 
     k_rest = k - n_top
-    if k_rest > 0 and i < len(order):
+    if k_rest > 0 and i < len(active_rows):
         taken = set()
-        for target in np.linspace(i, len(order) - 1, k_rest).round().astype(int):
+        for target in np.linspace(i, len(active_rows) - 1, k_rest).round().astype(int):
             j = int(target)
-            while j < len(order):
-                if j not in taken and take(order[j]):
+            while j < len(active_rows):
+                if j not in taken and take(j):
                     taken.add(j)
                     break
                 j += 1
@@ -155,28 +156,46 @@ def _take_distinct(indices, texts, seen, max_chars, k):
     return out
 
 
-def select_score_pool(act_col, texts, exclude_norms, n, seed, max_chars=MAX_TWEET_CHARS):
+def select_score_pool(active_rows, active_values, n_tweets, texts, exclude_norms,
+                      n, seed, max_chars=MAX_TWEET_CHARS):
     """Held-out positives spread across the activation range (as (text, activation)
     pairs); random non-activating negatives, balanced to the number of positives."""
     rng = random.Random(seed)
     seen = set(exclude_norms)
 
-    act_order = np.argsort(-act_col)
-    n_act = int((act_col > 0).sum())
     positives = []
+    n_act = len(active_rows)
     if n_act:
-        cand = act_order[np.linspace(0, n_act - 1, min(n_act, n * 8)).round().astype(int)]
-        held = _take_distinct(cand, texts, seen, max_chars, len(cand))
+        ranks = np.linspace(0, n_act - 1, min(n_act, n * 8)).round().astype(int)
+        held = []
+        for rank in ranks:
+            j = int(active_rows[rank])
+            t = str(texts[j]).strip()
+            norm = normalize_for_dedup(t)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            held.append((t[:max_chars], float(active_values[rank])))
         if len(held) > n:
             held = [held[i] for i in np.linspace(0, len(held) - 1, n).round().astype(int)]
-        positives = [(t, float(act_col[j])) for t, j in held]
+        positives = held
 
     target = len(positives)
-    nonact = np.where(act_col == 0)[0]
     negatives = []
-    if len(nonact) and target:
-        rand_local = rng.sample(range(len(nonact)), min(len(nonact), target * 4))
-        negatives = [t for t, _ in _take_distinct(nonact[rand_local], texts, seen, max_chars, target)]
+    n_nonact = n_tweets - n_act
+    if n_nonact and target:
+        active_sorted = np.sort(active_rows)
+        candidates, sampled = [], set()
+        while len(candidates) < min(n_nonact, target * 4):
+            j = rng.randrange(n_tweets)
+            if j in sampled:
+                continue
+            sampled.add(j)
+            at = np.searchsorted(active_sorted, j)
+            if at == len(active_sorted) or active_sorted[at] != j:
+                candidates.append(j)
+        negatives = [t for t, _ in _take_distinct(
+            np.asarray(candidates), texts, seen, max_chars, target)]
     return positives, negatives
 
 
@@ -427,20 +446,6 @@ def main(args):
     texts = tweets_df["text"].to_numpy()
     handles = tweets_df["twitter"].astype(str).to_numpy()
 
-    print("Selecting examples...")
-    jobs = []
-    for feature in tqdm(features):
-        act_col = align_to_tweets(acts.col(feature), acts.ids, tweet_ids)
-        examples, n_top, ex_norms = select_interp_examples(texts, handles, act_col, args.n_examples)
-        positives, negatives = [], []
-        if not args.no_score:
-            positives, negatives = select_score_pool(
-                act_col, texts, ex_norms, args.score_per_class, seed=feature)
-        n_act = int((act_col > 0).sum())
-        jobs.append({"feature": feature, "examples": examples, "n_top": n_top,
-                     "positives": positives, "negatives": negatives,
-                     "n_act": n_act, "pct_act": 100 * n_act / len(act_col)})
-
     csv_lock = threading.Lock()
 
     def append_row(row):
@@ -448,12 +453,42 @@ def main(args):
             pd.DataFrame([row]).to_csv(out_path, mode="a", index=False,
                                        header=not os.path.exists(out_path))
 
-    todo = [j for j in jobs if (j["feature"], MODEL) not in done]
+    todo = [f for f in features if (f, MODEL) not in done]
     if not todo:
         print("nothing to do")
         return
+
+    print("Aligning activation rows to tweets once...")
+    tweet_row_of_id = pd.Series(np.arange(len(tweet_ids)), index=tweet_ids)
+    act_to_tweet = tweet_row_of_id.reindex(acts.ids).to_numpy()
+    if pd.isna(act_to_tweet).any():
+        raise ValueError("activation ids and tweet ids do not match")
+    act_to_tweet = act_to_tweet.astype(np.int64, copy=False)
+
+    def prepare(feature):
+        act_rows, act_values = acts.sparse_col(feature)
+        tweet_rows = act_to_tweet[act_rows]
+        positive = act_values > 0
+        tweet_rows = tweet_rows[positive]
+        act_values = act_values[positive]
+        order = np.lexsort((tweet_rows, -act_values))
+        tweet_rows = tweet_rows[order]
+        act_values = act_values[order]
+
+        examples, n_top, ex_norms = select_interp_examples(
+            texts, handles, tweet_rows, act_values, args.n_examples)
+        positives, negatives = [], []
+        if not args.no_score:
+            positives, negatives = select_score_pool(
+                tweet_rows, act_values, len(texts), texts, ex_norms,
+                args.score_per_class, seed=feature)
+        n_act = len(tweet_rows)
+        return {"feature": feature, "examples": examples, "n_top": n_top,
+                "positives": positives, "negatives": negatives,
+                "n_act": n_act, "pct_act": 100 * n_act / len(texts)}
+
     client = DeepSeekClient(MODEL, args.max_cost)
-    bar = tqdm(total=len(todo), desc=MODEL)
+    api_bar = tqdm(total=len(todo), desc=MODEL, position=1)
 
     def work(j):
         try:
@@ -465,11 +500,22 @@ def main(args):
                         "pct_activating": round(j["pct_act"], 4)})
         except Exception as exc:
             print(f"\nfeature {j['feature']} failed: {exc}")
-        bar.update(1)
+        api_bar.update(1)
 
+    max_pending = max(args.concurrency * 2, 1)
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        list(ex.map(work, todo))
-    bar.close()
+        pending = set()
+        for feature in tqdm(todo, desc="Pipeline", position=0):
+            pending.add(ex.submit(work, prepare(feature)))
+            if len(pending) >= max_pending:
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    future.result()
+        while pending:
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                future.result()
+    api_bar.close()
     u = client.usage
     print(f"{MODEL}: {u['miss']:,} input (miss) + {u['hit']:,} input (hit) + "
           f"{u['out']:,} output tokens -> ${client.cost():.4f}")

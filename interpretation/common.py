@@ -36,16 +36,23 @@ class Activations:
     def __init__(self, sae_path):
         self._f = h5py.File(os.path.join(sae_path, "activations.h5"), "r")
         self.indptr = self._f["indptr"][:]
+        self._indices = self._f["indices"]
+        self._data = self._f["data"]
         self.shape = tuple(int(x) for x in self._f.attrs["shape"][:])
         self.ids = self._f["ids"][:]
         self.nnz = np.diff(self.indptr)
         self.pct_active = 100.0 * self.nnz / self.shape[0]
 
+    def sparse_col(self, feature):
+        """Nonzero (row indices, values) for a 1-indexed feature."""
+        s, e = self.indptr[feature - 1], self.indptr[feature]
+        return self._indices[s:e], self._data[s:e]
+
     def col(self, feature):
         """Dense activation column for a 1-indexed feature."""
-        s, e = self.indptr[feature - 1], self.indptr[feature]
         out = np.zeros(self.shape[0], dtype=np.float32)
-        out[self._f["indices"][s:e]] = self._f["data"][s:e]
+        indices, data = self.sparse_col(feature)
+        out[indices] = data
         return out
 
 
