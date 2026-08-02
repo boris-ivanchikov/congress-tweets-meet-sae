@@ -105,6 +105,7 @@ def main(args):
 
     if is_main:
         logger.info("Creating graph...")
+
     model = init_sae(data["model"])
     graph = TrainingGraph(model, config).to(device)
     ddp = DDP(graph, device_ids=[local_rank]) if distributed else graph
@@ -116,10 +117,22 @@ def main(args):
         logger.info(f"Starting run {name}")
         writer = SummaryWriter(f"sae/runs/{name}")
 
+    batch_size_per_gpu = config.batch_size // world_size     
+    loader = EmbeddingLoader(
+        path="data/embeddings.npz", 
+        batch_size=batch_size_per_gpu,
+        shuffle=True, rank=rank, 
+        world_size=world_size
+    )
+    
     if is_main:
-        logger.info("Creating loader...")
-    loader = EmbeddingLoader(path="data/embeddings.npz", batch_size=config.batch_size,
-                             shuffle=True, rank=rank, world_size=world_size)
+        logger.info(f"Using {world_size} GPUs, batch size {batch_size_per_gpu} per GPU.")
+
+    mean = loader.embeddings.float().mean(dim=0).to(device)
+    if distributed:
+        dist.all_reduce(mean)
+        mean /= world_size
+    graph.model.b_pre.data = mean
 
     optimizer = torch.optim.Adam(graph.parameters(), lr=config.lr)
 
@@ -132,7 +145,10 @@ def main(args):
             outputs = ddp(x.to(device))
             loss = outputs["loss"]
             loss.backward()
+            graph.model.project_decoder_grads()
+            optimizer.step()
             graph.model.normalize_decoder_weights()
+            optimizer.zero_grad()
 
             if is_main:
                 global_step = epoch * len(loader) + i
@@ -140,10 +156,6 @@ def main(args):
                 writer.add_scalar("reconstruction_loss", outputs["reconstruction_loss"], global_step=global_step)
                 writer.add_scalar("aux_loss", outputs["aux_loss"], global_step=global_step)
                 writer.add_scalar("num_dead", outputs["num_dead"], global_step=global_step)
-
-            optimizer.step()
-            optimizer.zero_grad()
-            if is_main:
                 pbar.update(1)
 
     if is_main:

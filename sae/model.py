@@ -74,6 +74,9 @@ class TopKSAE(nn.Module):
         self.w_dec = nn.Linear(input_dim * expansion_factor, input_dim, bias=False)
         self.b_pre = nn.Parameter(torch.zeros(input_dim))
         self.b_enc = nn.Parameter(torch.zeros(input_dim * expansion_factor))
+
+        self.w_dec.weight.data /= self.w_dec.weight.data.norm(dim=0, keepdim=True)
+        self.w_enc.weight.data = self.w_dec.weight.data.T.clone()
     
     def encode(self, x):
         return self.w_enc(x - self.b_pre) + self.b_enc
@@ -90,12 +93,15 @@ class TopKSAE(nn.Module):
         return self.topk(self.encode(x))
     
     @torch.no_grad()
-    def normalize_decoder_weights(self):
+    def project_decoder_grads(self):
         w = self.w_dec.weight
         w_normed = w / w.norm(dim=0, keepdim=True)
-        grad_proj = (w.grad * w_normed).sum(dim=0, keepdim=True) * w_normed
-        w.grad -= grad_proj
-        w.data = w_normed
+        w.grad -= (w.grad * w_normed).sum(dim=0, keepdim=True) * w_normed
+
+    @torch.no_grad()
+    def normalize_decoder_weights(self):
+        w = self.w_dec.weight
+        w.data /= w.data.norm(dim=0, keepdim=True)
         
         
 class BatchTopKSAE(TopKSAE):
