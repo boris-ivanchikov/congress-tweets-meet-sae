@@ -10,7 +10,6 @@ import os
 import json
 import html
 import argparse
-from itertools import zip_longest
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -26,29 +25,25 @@ MAX_LENGTH = 100
 OCCLUSION_BATCH = 64
 ATTR_REF_QUANTILE = 0.99
 ATTR_ACTIVATION_GAMMA = 1.0
-QUARTILE_LABELS = {1: "Q1 — strongest activation", 2: "Q2", 3: "Q3", 4: "Q4 — weakest activation"}
+SAMPLE_LABELS = {"top": "Top 10 activating tweets",
+                 "random": "Random 10 activating tweets"}
 
 
-def pick_tweets(tweets_df, activations, n):
+def pick_tweets(tweets_df, activations, n_top=10, n_random=10, seed=0):
+    """Top activators plus a reproducible random sample from the remaining
+    activating tweets. Human inspection is intentionally not held out from the
+    interpreter or scorer."""
     df = tweets_df.assign(act=activations)
     activating = df[df["act"] > 0].sort_values("act", ascending=False)
 
     if len(activating) == 0:
-        return [], df[df["act"] == 0].sample(n=0).to_dict("records")
+        return []
 
-    take_all = len(activating) <= 4 * n
-    bounds = np.linspace(0, len(activating), 5, dtype=int)
-    parts = []
-    for q in range(4):
-        g = activating.iloc[bounds[q]:bounds[q + 1]]
-        if not take_all:
-            g = g.sample(n=n)
-        parts.append(g.sort_values("act", ascending=False).assign(quartile=q + 1))
-    active = pd.concat(parts)
-
-    non_activating = df[df["act"] == 0]
-    not_active = non_activating.sample(n=min(len(active), len(non_activating)))
-    return active.to_dict("records"), not_active.to_dict("records")
+    top = activating.iloc[:n_top].assign(sample_group="top")
+    rest = activating.iloc[n_top:]
+    random_sample = rest.sample(n=min(n_random, len(rest)), random_state=seed)
+    random_sample = random_sample.sort_values("act", ascending=False).assign(sample_group="random")
+    return pd.concat([top, random_sample]).to_dict("records")
 
 
 def gpu_pool():
@@ -169,7 +164,7 @@ class ParallelAttributor:
 def build_attr_jobs(features_raw):
     jobs = []
     for f in features_raw:
-        for tweet in f["active"] + f["not_active"]:
+        for tweet in f["active"]:
             scale = activation_scale(tweet.get("preact", 0.0), f["threshold"], f["attr_ref"])
             if scale > 0:
                 jobs.append(((f["id"], tweet["tweet_id"]), str(tweet["text"]), f["id"] - 1))
@@ -262,15 +257,19 @@ TEMPLATE = jinja2.Template("""<!DOCTYPE html>
   .summary { margin-bottom: 22px; }
   .stat { font-size: 14px; margin: 0 0 14px; color: #424a53; }
   .stat b { color: #1f2328; font-size: 16px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: stretch; }
   .autointerp { background: linear-gradient(180deg,#fff,#fbfcfe); border: 1px solid #c8d3e0;
                 border-left: 4px solid #0969da; border-radius: 10px; padding: 14px 16px;
                 margin-bottom: 16px; box-shadow: 0 1px 2px rgba(31,35,40,.05); }
+  .interp-levels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .interp-level + .interp-level { border-left: 1px solid #d8dee4; padding-left: 16px; }
   .ai-kicker { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
                color: #0969da; margin: 0 0 4px; }
   .ai-label { font-size: 18px; font-weight: 700; color: #1f2328; margin: 0 0 6px; }
   .ai-expl { font-size: 14px; color: #424a53; margin: 0; }
   .ai-meta { font-size: 11px; color: #8a929b; margin: 8px 0 0;
              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .ai-relation { font-size: 12px; color: #656d76; margin: 10px 0 0; }
   .chart { background: #fff; border: 1px solid #d8dee4; border-radius: 10px; padding: 12px 14px;
            box-shadow: 0 1px 2px rgba(31,35,40,.04); margin-bottom: 14px; }
   .chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
@@ -294,6 +293,8 @@ TEMPLATE = jinja2.Template("""<!DOCTYPE html>
                box-shadow: 0 4px 14px rgba(31,35,40,.25); white-space: nowrap; }
   .chart-tip b { color: #fff; font-weight: 600; }
   .chart-tip .tip-g { color: #57d977; } .chart-tip .tip-x { color: #adb5bd; }
+  @media (max-width: 850px) { .charts, .interp-levels { grid-template-columns: 1fr; }
+    .interp-level + .interp-level { border-left: 0; border-top: 1px solid #d8dee4; padding: 12px 0 0; } }
 </style>
 </head>
 <body>
@@ -322,31 +323,43 @@ TEMPLATE = jinja2.Template("""<!DOCTYPE html>
     <div class="summary">
       {% if f.autointerp %}
       <div class="autointerp">
-        <p class="ai-kicker">Auto-interpretation</p>
-        <p class="ai-label">{{ f.autointerp.label }}</p>
-        <p class="ai-expl">{{ f.autointerp.explanation }}</p>
+        <div class="interp-levels">
+          <div class="interp-level">
+            <p class="ai-kicker">Core interpretation</p>
+            <p class="ai-label">{{ f.autointerp.core_label }}</p>
+            <p class="ai-expl">{{ f.autointerp.core_explanation }}</p>
+            {% if f.autointerp.core_scores %}<p class="ai-meta">{{ f.autointerp.core_scores }}</p>{% endif %}
+          </div>
+          <div class="interp-level">
+            <p class="ai-kicker">Broad activation envelope</p>
+            <p class="ai-label">{{ f.autointerp.broad_label }}</p>
+            <p class="ai-expl">{{ f.autointerp.broad_explanation }}</p>
+            {% if f.autointerp.broad_scores %}<p class="ai-meta">{{ f.autointerp.broad_scores }}</p>{% endif %}
+          </div>
+        </div>
+        {% if f.autointerp.relation %}<p class="ai-relation">{{ f.autointerp.relation }}</p>{% endif %}
         <p class="ai-meta">{{ f.autointerp.meta }}</p>
       </div>
       {% endif %}
       <p class="stat">Activates on <b>{{ f.summary.n_act }}</b> / {{ f.summary.total }} tweets ({{ f.summary.pct }})</p>
-      <div class="chart" data-kind="preact" data-fid="{{ f.id }}">
-        <div class="chart-head">
-          <span class="chart-title">Pre-activation distribution</span>
-          <span class="legend">
-            <span class="chip" style="background:#2ea043"></span>activating
-            <span class="chip" style="background:#8b97a3"></span>not activating
-          </span>
+      <div class="charts">
+        <div class="chart" data-kind="preact" data-fid="{{ f.id }}">
+          <div class="chart-head">
+            <span class="chart-title">Pre-activation distribution</span>
+            <span class="legend">
+              <span class="chip" style="background:#2ea043"></span>activating
+              <span class="chip" style="background:#8b97a3"></span>not activating
+            </span>
+          </div>
+          <div class="chart-svg"></div>
         </div>
-        <div class="chart-svg"></div>
-      </div>
-      <div class="chart" data-kind="users" data-fid="{{ f.id }}">
-        <div class="chart-head"><span class="chart-title">Top users by activating tweets</span></div>
-        <div class="chart-svg"></div>
+        <div class="chart" data-kind="users" data-fid="{{ f.id }}">
+          <div class="chart-head"><span class="chart-title">Top users by activating tweets</span></div>
+          <div class="chart-svg"></div>
+        </div>
       </div>
     </div>
     <div class="grid">
-      <p class="col-label">Activating</p>
-      <p class="col-label">Not activating (random)</p>
       {% if attributed %}
       <div class="controls">
         <label class="toggle"><input type="checkbox" class="attrToggle" checked> Token attribution</label>
@@ -392,7 +405,7 @@ TEMPLATE = jinja2.Template("""<!DOCTYPE html>
   function hideTip() { tip.style.opacity = 0; }
 
   function renderPreact(host, d) {
-    var W = host.clientWidth, H = 300;
+    var W = host.clientWidth, H = 240;
     var m = { t: 14, r: 14, b: 34, l: 50 };
     var pw = W - m.l - m.r, ph = H - m.t - m.b;
     var nb = d.active.length;
@@ -532,20 +545,19 @@ def render_report(run, features_raw, attr_map):
     features = []
     for f in features_raw:
         active_cards = cards_for(f["active"], attr_map, f["id"], f["threshold"], f["attr_ref"])
-        not_active_cards = cards_for(f["not_active"], attr_map, f["id"], f["threshold"], f["attr_ref"])
 
-        groups = {q: [] for q in (1, 2, 3, 4)}
+        groups = {name: [] for name in SAMPLE_LABELS}
         for tweet, card in zip(f["active"], active_cards):
-            groups[tweet["quartile"]].append(card)
+            groups[tweet["sample_group"]].append(card)
 
-        blocks, offset = [], 0
-        for q in (1, 2, 3, 4):
-            if not groups[q]:
+        blocks = []
+        for name, label in SAMPLE_LABELS.items():
+            if not groups[name]:
                 continue
-            right = not_active_cards[offset:offset + len(groups[q])]
-            offset += len(groups[q])
-            rows = [list(p) for p in zip_longest(groups[q], right)]
-            blocks.append({"label": QUARTILE_LABELS[q], "rows": rows})
+            cards = groups[name]
+            rows = [(cards[i], cards[i + 1] if i + 1 < len(cards) else None)
+                    for i in range(0, len(cards), 2)]
+            blocks.append({"label": label, "rows": rows})
 
         features.append({"id": f["id"], "blocks": blocks, "summary": f["summary"],
                          "autointerp": f.get("autointerp")})
@@ -566,22 +578,50 @@ def load_interpretations(csv_path, model=None):
         df = df[df["model"] == model]
     out = {}
     for _, row in df.drop_duplicates("feature", keep="last").iterrows():
+        is_nested = pd.notna(row.get("core_label"))
+        core_label = row.get("core_label") if is_nested else row.get("label", "")
+        core_explanation = (row.get("core_explanation") if is_nested
+                            else row.get("explanation", ""))
+        broad_label = row.get("broad_label") if is_nested else ""
+        broad_explanation = row.get("broad_explanation") if is_nested else ""
+        if pd.isna(broad_label) or not str(broad_label).strip():
+            broad_label = "No coherent broad envelope"
+        if pd.isna(broad_explanation):
+            broad_explanation = ""
+
+        def score_text(level):
+            parts = []
+            weighted = row.get(f"score_{level}")
+            if pd.notna(weighted):
+                parts.append(f"weighted {weighted}")
+            quartiles = []
+            for q in range(1, 5):
+                value = row.get(f"score_{level}_q{q}")
+                if pd.notna(value):
+                    quartiles.append(f"Q{q} {value}")
+            if quartiles:
+                parts.append(" / ".join(quartiles))
+            negative = row.get(f"score_neg_{level}")
+            if pd.notna(negative):
+                parts.append(f"neg {negative}")
+            return " · ".join(parts)
+
         meta = []
-        if pd.notna(row.get("type")):
-            meta.append(str(row["type"]))
-        if pd.notna(row.get("score")):
-            ci = ""
-            if pd.notna(row.get("score_lo")):
-                ci = f" [{row['score_lo']:.2f}, {row['score_hi']:.2f}]"
-            meta.append(f"detection acc {row['score']}{ci} "
-                        f"({int(row['n_pos']) + int(row['n_neg'])} held-out)")
-        if pd.notna(row.get("score_weighted")):
-            meta.append(f"act-weighted {row['score_weighted']}")
-        meta.append(f"{int(row['n_examples'])} examples")
-        meta.append(str(row["model"]))
+        coherence = row.get("tail_coherence")
+        if pd.notna(coherence):
+            meta.append(f"tail {coherence}")
+        if pd.notna(row.get("n_examples")):
+            meta.append(f"{int(row['n_examples'])} examples")
+        if pd.notna(row.get("model")):
+            meta.append(str(row["model"]))
         out[int(row["feature"])] = {
-            "label": row["label"],
-            "explanation": row["explanation"] if pd.notna(row["explanation"]) else "",
+            "core_label": core_label,
+            "core_explanation": core_explanation if pd.notna(core_explanation) else "",
+            "broad_label": broad_label,
+            "broad_explanation": broad_explanation,
+            "core_scores": score_text("core"),
+            "broad_scores": score_text("broad"),
+            "relation": row.get("relation") if pd.notna(row.get("relation")) else "",
             "meta": " · ".join(meta),
         }
     return out
@@ -592,13 +632,18 @@ def parse_args():
     parser.add_argument("--path", type=str, required=True,
                         help="Path to trained SAE run directory (read-only input)")
     parser.add_argument("--features", nargs="+", type=int, required=True, help="Feature indices (1-indexed)")
-    parser.add_argument("--n", type=int, default=5, help="Activating tweets sampled per quartile (4*n total)")
+    parser.add_argument("--n-top", type=int, default=10,
+                        help="Number of strongest activating tweets to display")
+    parser.add_argument("--n-random", type=int, default=10,
+                        help="Random activating tweets to display after the top group")
     parser.add_argument("--out", type=str, default=None,
                         help="Output HTML path (default: interpretation/runs/<run>/report.html)")
     parser.add_argument("--token-attr", action="store_true", help="Color tokens by occlusion attribution")
     parser.add_argument("--interpretations", type=str, default=None,
                         help="interpretations.csv from autointerp.py "
                              "(default: interpretation/runs/<run>/interpretations.csv)")
+    parser.add_argument("--no-interpretations", action="store_true",
+                        help="Render activations without loading or displaying interpretations")
     parser.add_argument("--interp-model", type=str, default=None,
                         help="Which model's interpretations to display (default: last per feature)")
     return parser.parse_args()
@@ -627,8 +672,11 @@ def main(args):
     pre_ids, preacts = compute_preacts(args.path, args.features)
     threshold = read_threshold(args.path)
 
-    interp_csv = args.interpretations or os.path.join(out_dir, "interpretations.csv")
-    interps = load_interpretations(interp_csv, args.interp_model)
+    if args.no_interpretations:
+        interps = {}
+    else:
+        interp_csv = args.interpretations or os.path.join(out_dir, "interpretations.csv")
+        interps = load_interpretations(interp_csv, args.interp_model)
 
     features_raw = []
     for feature in args.features:
@@ -644,12 +692,12 @@ def main(args):
         act_col = align_to_tweets(full_act, acts.ids, tweet_ids)
         preact_col = align_to_tweets(preact_full, pre_ids, tweet_ids)
         work_df = tweets_df.assign(preact=preact_col)
-        active, not_active = pick_tweets(work_df, act_col, args.n)
+        active = pick_tweets(work_df, act_col, args.n_top, args.n_random, seed=feature)
 
-        features_raw.append({"id": feature, "active": active, "not_active": not_active,
+        features_raw.append({"id": feature, "active": active,
                              "summary": summary, "threshold": threshold, "attr_ref": attr_ref,
                              "autointerp": interps.get(feature)})
-        print(f"Feature {feature}: {len(active)} activating, {len(not_active)} non-activating")
+        print(f"Feature {feature}: {len(active)} activating tweets")
 
     attr_map = None
     if args.token_attr:

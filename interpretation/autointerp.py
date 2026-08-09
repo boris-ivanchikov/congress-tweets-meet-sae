@@ -7,9 +7,10 @@ directory is never written to. Features are selected by activation-rate band
 
 Examples per feature are deduplicated, capped per author, and stratified across
 the activation range (strongest first, activation values shown to the model).
-Each explanation is optionally scored by held-out detection: the model classifies
-unseen positives (spread across the activation range) against random
-non-activating negatives.
+Each feature receives a narrow core interpretation for its strongest activations
+and a broader activation-envelope interpretation for its weaker semantic
+neighborhood. Held-out scoring reports both coverages by activation-rank quartile
+plus specificity on random non-activating tweets.
 """
 
 import os
@@ -36,62 +37,79 @@ PRICES = {
     "deepseek-v4-pro": (0.435, 0.003625, 0.87),
 }
 
-N_EXAMPLES = 15
+N_EXAMPLES = 25
 TOP_FRACTION = 0.4          # share of examples taken from the very top of the range
 AUTHOR_CAP = 2              # max examples per twitter handle
 MAX_TWEET_CHARS = 280
-SCORE_PER_CLASS = 10
+SCORE_PER_QUARTILE = 10
+SCORE_NEGATIVES = 40
+SCORE_CHUNK_SIZE = 20
 INTERP_MAX_TOKENS = 512
 INTERP_THINKING_MAX_TOKENS = 4096
+INTERP_RETRY_MAX_TOKENS = 800
 
 INTERP_SYSTEM = (
     "Task\n"
     "Interpret one feature of a sparse autoencoder trained on embeddings of congressional tweets. "
     "You will receive activating tweets sorted from strongest to weakest, with activation values. "
-    "Infer the single property best represented by the feature.\n\n"
-    "Activation types\n"
-    "Choose exactly one type. The examples below are fabricated and are not evaluation data.\n"
-    "- topic: a recurring subject, activity, or policy domain. Example: tweets about coral bleaching, "
-    "reef restoration, and ocean warming represent the topic 'coral reef conservation'.\n"
-    "- entity: one specific person, organization, place, event, or named program. Example: tweets about "
-    "performances at, renovations to, and directions to Maple Hall represent the entity 'Maple Hall'.\n"
-    "- lexical: the same word, phrase, hashtag, handle, or character sequence used across otherwise "
-    "unrelated meanings or subjects. Example: 'seal the envelope', 'a harbor seal', and 'the official "
-    "seal' represent the lexical item 'seal'.\n"
-    "- style: a recurring tone, communicative purpose, rhetorical form, or layout. Example: several "
-    "questions challenging a decision represent the style 'rhetorical questions'.\n"
-    "- other: a stable property that does not fit the four types above. Example: tweets written "
-    "primarily in Spanish represent the other property 'Spanish-language text'.\n\n"
-    "Special instructions\n"
-    "- Treat the strongest activators as the primary evidence. Use the weaker activation tail to refine "
-    "the boundary, but allow very weak activations to be noise; do not let them outvote a clear strong "
-    "pattern.\n"
-    "- Choose the narrowest interpretation supported by several strong examples. Do not anchor on a "
-    "detail found in only one or two examples, and do not broaden a coherent pattern unnecessarily.\n"
-    "- A repeated word is not automatically lexical. Choose lexical only when the shared surface form "
-    "persists across semantically unrelated contexts. If the surrounding tweets concern the same "
-    "real-world subject or referent, choose topic or entity even when they repeat the same terminology.\n"
-    "- Base the interpretation only on the tweet text. Be concise and politically neutral. Give one "
-    "interpretation, not a list of alternatives.\n\n"
+    "Describe its meaning at two nested levels.\n\n"
+    "Interpretation levels\n"
+    "- Core: the narrow, specific property that best explains the strongest activations. It may be a "
+    "topic, entity, lexical pattern, communicative function, tone, or other stable property. Do not "
+    "weaken this interpretation merely to cover the tail.\n"
+    "- Broad envelope: the smallest meaningful generalization of the core that explains as many weaker "
+    "activations as possible. It may generalize subject matter, rhetorical function, morphology, or "
+    "another dimension; it need not be a topical category. The core must be a genuine instance of it.\n\n"
+    "Reasoning rules\n"
+    "1. Infer the core from the strongest group first and hold it fixed. Choose the most specific pattern "
+    "supported by several strong, author-diverse tweets rather than one vivid example.\n"
+    "2. Then inspect the activation-range sample and generalize only as far as needed. Look for a clear "
+    "semantic, functional, stylistic, lexical, or morphological relationship to the core.\n"
+    "3. If the weaker tweets have several unrelated patterns and no useful common generalization, set "
+    "the broad label and explanation to null and mark the tail as noise. Do not invent an envelope such "
+    "as 'politics' that would apply to most congressional tweets.\n"
+    "4. Do not add a stance, causal claim, audience, or political purpose unless it recurs. Base both "
+    "interpretations only on the tweet text; be concise and politically neutral.\n\n"
     "Output format\n"
     "Return one JSON object and nothing else:\n"
-    '{"analysis": "<reasoning>", "label": "<3-6 word noun phrase>", '
-    '"type": "<topic|entity|lexical|style|other>", "explanation": "<1-2 sentences>"}\n'
-    "- analysis: at most 100 words. Identify the strongest coherent signal, use the weaker examples to "
-    "check its scope, and justify the selected type. Do not quote tweets.\n"
-    "- label: lowercase except proper nouns and acronyms; no trailing period.\n"
-    "- explanation: state the general property directly. Do not mention features, examples, evidence, "
-    "or activation strengths, and do not quote the supplied tweets."
+    '{"analysis": "<reasoning>", "core_label": "<3-8 word noun phrase>", '
+    '"core_explanation": "<1-2 sentences>", "broad_label": "<3-8 word noun phrase or null>", '
+    '"broad_explanation": "<1-2 sentences or null>", '
+    '"tail_coherence": "<coherent|partial|noise>", "relation": "<one sentence>"}\n'
+    "- analysis: at most 100 words. Establish the core, then test the smallest broader envelope. Do not "
+    "quote tweets.\n"
+    "- labels: lowercase except proper nouns and acronyms; no trailing period.\n"
+    "- explanations: state each property directly. Never write 'This feature represents', "
+    "'The feature represents', 'This feature captures', 'The feature captures', or similar framing. "
+    "Do not mention features, examples, evidence, or activation strengths, and do not quote the "
+    "supplied tweets.\n"
+    "- relation: explain how the core is nested inside the broad envelope; if the broad interpretation "
+    "is null, briefly state that the weaker tail is not coherent."
 )
 
 SCORE_SYSTEM = (
-    "You are a meticulous AI interpretability researcher. You are given a description of a feature "
-    "(for example 'male pronouns' or 'support for military aid') and a numbered list of "
-    "tweets. For each tweet, decide whether it genuinely exhibits the described property.\n\n"
-    "Judge STRICTLY: mark a tweet 1 only if it actually matches the description, not merely because "
-    "it shares a word or broad topic with it; otherwise mark 0.\n\n"
-    "Return only a JSON array of integers (1 for match, 0 for no match), one per tweet, in order, "
-    "and nothing else. Example: [1,0,0,1,0]"
+    "Task\n"
+    "Evaluate how well each tweet matches two nested descriptions of an SAE feature. Judge every "
+    "tweet independently; other tweets in the batch must not change the standard.\n\n"
+    "Decisions\n"
+    "Answer these two yes/no questions for each tweet, in this order:\n"
+    "1. Broad: Does the tweet genuinely fall anywhere within the broad label and description? The "
+    "broad label defines the category; details in its explanation are illustrative rather than an "
+    "exhaustive list. A real subtopic or instance counts even if it uses different words or differs "
+    "from the narrow core.\n"
+    "2. Core: Does the tweet satisfy the narrower core label and description?\n\n"
+    "Rules\n"
+    "- Judge semantic properties by meaning, not word overlap. Ordinary implications stated or clearly "
+    "identified in the text count, but do not invent absent context.\n"
+    "- Judge lexical, orthographic, numeric, structural, and other formal properties directly from the "
+    "text, regardless of its topic.\n"
+    "- The core is nested inside the broad category: core=yes requires broad=yes.\n"
+    "- Be precise, but do not reject a genuine category member merely because it is not one of the "
+    "specific cases named in the descriptions.\n\n"
+    "Output\n"
+    "Return only one JSON array containing one [broad, core] pair per tweet, in order. Use 1 for yes "
+    "and 0 for no. Valid pairs are [1,1], [1,0], and [0,0]. "
+    "Example: [[1,1],[1,0],[0,0]]"
 )
 
 
@@ -157,17 +175,31 @@ def _take_distinct(indices, texts, seen, max_chars, k):
 
 
 def select_score_pool(active_rows, active_values, n_tweets, texts, exclude_norms,
-                      n, seed, max_chars=MAX_TWEET_CHARS):
-    """Held-out positives spread across the activation range (as (text, activation)
-    pairs); random non-activating negatives, balanced to the number of positives."""
+                      per_quartile, n_negatives, seed, max_chars=MAX_TWEET_CHARS):
+    """Select held-out positives from each activation-rank quartile plus random
+    exact-zero negatives.
+
+    Q1 uses the strongest unseen tweets so it is a stable test of whether the
+    interpretation describes the feature's head. Q2--Q4 are sampled uniformly
+    within their quartiles to diagnose semantic decay through the weaker tail.
+    """
     rng = random.Random(seed)
     seen = set(exclude_norms)
 
     positives = []
     n_act = len(active_rows)
-    if n_act:
-        ranks = np.linspace(0, n_act - 1, min(n_act, n * 8)).round().astype(int)
-        held = []
+    for quartile in range(4):
+        start = quartile * n_act // 4
+        stop = (quartile + 1) * n_act // 4
+        width = stop - start
+        if not width:
+            continue
+        # The head score must actually test the held-out head. Uniform sampling
+        # from a very dense top quartile can land far below the coherent region.
+        # Lower quartiles remain uniform diagnostic samples.
+        ranks = (range(start, stop) if quartile == 0 else
+                 rng.sample(range(start, stop), min(width, per_quartile * 50)))
+        held = 0
         for rank in ranks:
             j = int(active_rows[rank])
             t = str(texts[j]).strip()
@@ -175,18 +207,17 @@ def select_score_pool(active_rows, active_values, n_tweets, texts, exclude_norms
             if not norm or norm in seen:
                 continue
             seen.add(norm)
-            held.append((t[:max_chars], float(active_values[rank])))
-        if len(held) > n:
-            held = [held[i] for i in np.linspace(0, len(held) - 1, n).round().astype(int)]
-        positives = held
+            positives.append((t[:max_chars], float(active_values[rank]), quartile + 1))
+            held += 1
+            if held >= per_quartile:
+                break
 
-    target = len(positives)
     negatives = []
     n_nonact = n_tweets - n_act
-    if n_nonact and target:
+    if n_nonact and n_negatives:
         active_sorted = np.sort(active_rows)
         candidates, sampled = [], set()
-        while len(candidates) < min(n_nonact, target * 4):
+        while len(candidates) < min(n_nonact, n_negatives * 4):
             j = rng.randrange(n_tweets)
             if j in sampled:
                 continue
@@ -195,27 +226,30 @@ def select_score_pool(active_rows, active_values, n_tweets, texts, exclude_norms
             if at == len(active_sorted) or active_sorted[at] != j:
                 candidates.append(j)
         negatives = [t for t, _ in _take_distinct(
-            np.asarray(candidates), texts, seen, max_chars, target)]
+            np.asarray(candidates), texts, seen, max_chars, n_negatives)]
     return positives, negatives
 
 
 # ---------------------------------------------------------------- prompts & parsing
 
 def build_interp_messages(examples, n_top):
-    numbered = "\n".join(f"{i + 1}. [activation={act:.2f}] {t}"
+    numbered = "\n".join(f"{i + 1}. [activation={act:.4g}] {t}"
                          for i, (t, act) in enumerate(examples))
     user = (f"Here are {len(examples)} tweets that activate this SAE feature, sorted by activation "
             f"strength (strongest first). The first {n_top} are the strongest activators overall; "
             f"the remaining {len(examples) - n_top} are sampled evenly across the rest of the "
             f"activation range.\n\n{numbered}\n\n"
-            "What property does this feature represent? Reply with only the JSON object.")
+            "What latent property best explains these activations? Reply with only the JSON object.")
     return [{"role": "system", "content": INTERP_SYSTEM}, {"role": "user", "content": user}]
 
 
-def build_score_messages(explanation, texts):
+def build_score_messages(core_label, core_explanation, broad_label, broad_explanation, texts):
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
-    user = (f"Concept: {explanation}\n\nTweets:\n{numbered}\n\n"
-            f"Reply with a JSON array of {len(texts)} integers (0 or 1), one per tweet in order.")
+    broad_label = broad_label or core_label
+    broad_explanation = broad_explanation or core_explanation
+    user = (f"Broad label: {broad_label}\nBroad description: {broad_explanation}\n\n"
+            f"Core label: {core_label}\nCore description: {core_explanation}\n\n"
+            f"Tweets:\n{numbered}\n\nReturn exactly {len(texts)} [broad, core] pairs.")
     return [{"role": "system", "content": SCORE_SYSTEM}, {"role": "user", "content": user}]
 
 
@@ -226,11 +260,8 @@ def _clean_label(label):
     return label
 
 
-FEATURE_TYPES = {"topic", "entity", "lexical", "style", "other"}
-
-
 def parse_interp_output(raw):
-    """Returns (label, type, explanation), or None if no valid JSON was produced."""
+    """Return the flat core/envelope interpretation, or None for invalid JSON."""
     text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
     # last JSON object wins: reasoning transcripts may contain earlier drafts
     candidates = re.findall(r"\{[^{}]*\}", text, flags=re.DOTALL)[::-1]
@@ -240,30 +271,56 @@ def parse_interp_output(raw):
     for cand in candidates:
         try:
             obj = json.loads(cand)
-            label = _clean_label(str(obj.get("label", "")))
-            ftype = str(obj.get("type", "")).strip().lower()
-            if ftype not in FEATURE_TYPES:
-                ftype = "other"
-            explanation = str(obj.get("explanation", "")).strip()
-            if label:
-                return label[:80], ftype, explanation
+            core_label = _clean_label(str(obj.get("core_label", "")))
+            core_explanation = str(obj.get("core_explanation", "")).strip()
+            raw_broad_label = obj.get("broad_label")
+            raw_broad_explanation = obj.get("broad_explanation")
+            broad_label = (_clean_label(str(raw_broad_label))
+                           if raw_broad_label is not None else "")
+            broad_explanation = (str(raw_broad_explanation).strip()
+                                 if raw_broad_explanation is not None else "")
+            tail_coherence = str(obj.get("tail_coherence", "partial")).strip().lower()
+            if tail_coherence not in {"coherent", "partial", "noise"}:
+                tail_coherence = "partial"
+            relation = str(obj.get("relation", "")).strip()
+            if core_label and core_explanation:
+                return {
+                    "core_label": core_label[:100],
+                    "core_explanation": core_explanation,
+                    "broad_label": broad_label[:100],
+                    "broad_explanation": broad_explanation,
+                    "tail_coherence": tail_coherence,
+                    "relation": relation,
+                }
         except (json.JSONDecodeError, AttributeError, TypeError):
             continue
     return None
 
 
 def parse_score_output(raw, n):
-    text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL)
-    m = re.search(r"\[[\s\S]*?\]", text)
-    if m:
+    """Parse broad-first [broad, core] pairs into 0/1/2 decisions."""
+    text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
+    start, stop = text.find("["), text.rfind("]")
+    if start < 0 or stop < start:
+        return None
+    try:
+        pairs = json.loads(text[start:stop + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(pairs, list) or len(pairs) != n:
+        return None
+    predictions = []
+    for pair in pairs:
+        if not isinstance(pair, list) or len(pair) != 2:
+            return None
         try:
-            nums = [int(x) for x in json.loads(m.group(0))]
-        except (json.JSONDecodeError, ValueError, TypeError):
-            nums = [int(x) for x in re.findall(r"[01]", m.group(0))]
-    else:
-        nums = [int(x) for x in re.findall(r"[01]", text)]
-    nums = [1 if x else 0 for x in nums][:n]
-    return nums if len(nums) == n else None
+            broad, core = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError):
+            return None
+        if broad not in {0, 1} or core not in {0, 1} or (core and not broad):
+            return None
+        predictions.append(2 if core else 1 if broad else 0)
+    return predictions
 
 
 # ---------------------------------------------------------------- API client
@@ -299,13 +356,19 @@ class DeepSeekClient:
         return (miss * miss_p + hit * hit_p + u.completion_tokens * out_p) / 1e6
 
     def chat(self, messages, max_tokens, thinking, json_object=False):
-        """Returns (text, $ spent on this call including retries)."""
+        """Return text, reasoning trace, finish reason, and dollars spent.
+
+        The loop retries transport/API errors only. Invalid model output is
+        handled once by the caller so it cannot trigger repeated thinking runs.
+        """
         if self.cost() >= self.max_cost:
             raise RuntimeError(f"cost cap ${self.max_cost} reached for {self.model}")
         last_exc, spent = None, 0.0
         for attempt in range(5):
             try:
                 kwargs = {"response_format": {"type": "json_object"}} if json_object else {}
+                if not thinking:
+                    kwargs["temperature"] = 0
                 r = self.client.chat.completions.create(
                     model=self.model, messages=messages, stream=False, max_tokens=max_tokens,
                     extra_body={"thinking": {"type": "enabled" if thinking else "disabled"}},
@@ -314,14 +377,11 @@ class DeepSeekClient:
                 spent += self._record(r.usage)
                 choice = r.choices[0]
                 text = (choice.message.content or "").strip()
-                if not text and choice.finish_reason == "length" and max_tokens < 4 * INTERP_MAX_TOKENS:
-                    # reasoning ate the whole budget before any answer was emitted
-                    max_tokens *= 2
-                    continue
+                reasoning = (getattr(choice.message, "reasoning_content", None) or "").strip()
                 if not text and not json_object:
                     # the answer sometimes lands in reasoning_content with empty content
-                    text = (getattr(choice.message, "reasoning_content", None) or "").strip()
-                return text, spent
+                    text = reasoning
+                return text, reasoning, choice.finish_reason, spent
             except Exception as exc:
                 last_exc = exc
                 time.sleep(min(2 ** attempt, 30))
@@ -331,52 +391,119 @@ class DeepSeekClient:
 # ---------------------------------------------------------------- per-feature job
 
 def interpret_feature(client, feature, examples, n_top, positives, negatives,
-                      thinking_interp=False):
+                      thinking_interp=False,
+                      thinking_max_tokens=INTERP_THINKING_MAX_TOKENS):
+    empty_scores = {"score_core": None, "score_broad": None,
+                    **{f"score_core_q{q}": None for q in range(1, 5)},
+                    **{f"score_broad_q{q}": None for q in range(1, 5)},
+                    "score_neg_core": None, "score_neg_broad": None}
     if not examples:
-        return {"label": "(no activating tweets)", "type": "other", "explanation": "",
-                "score": None, "score_weighted": None,
-                "n_pos": 0, "n_neg": 0, "cost_usd": 0.0}
+        return {"core_label": "(no activating tweets)", "core_explanation": "",
+                "broad_label": "", "broad_explanation": "",
+                "tail_coherence": "noise", "relation": "",
+                **empty_scores, "cost_usd": 0.0, "score_details": [],
+                "reasoning_debug": None}
 
     cost, parsed = 0.0, None
-    max_tokens = INTERP_THINKING_MAX_TOKENS if thinking_interp else INTERP_MAX_TOKENS
-    for _ in range(3):
-        raw, spent = client.chat(build_interp_messages(examples, n_top), max_tokens,
-                                 thinking=thinking_interp, json_object=True)
-        cost += spent
-        parsed = parse_interp_output(raw)
-        if parsed:
-            break
-    if parsed is None:
-        return {"label": "(parse failed)", "type": "other", "explanation": "",
-                "score": None, "score_weighted": None,
-                "n_pos": 0, "n_neg": 0, "cost_usd": round(cost, 6)}
-    label, ftype, explanation = parsed
+    messages = build_interp_messages(examples, n_top)
+    max_tokens = thinking_max_tokens if thinking_interp else INTERP_MAX_TOKENS
+    raw, reasoning, finish_reason, spent = client.chat(
+        messages, max_tokens, thinking=thinking_interp, json_object=True)
+    cost += spent
+    initial_raw = raw
+    initial_finish_reason = finish_reason
+    recovery_used = False
+    parsed = parse_interp_output(raw)
 
-    score = score_weighted = None
-    if explanation and positives and negatives:
-        items = [(t, 1, a) for t, a in positives] + [(t, 0, 0.0) for t in negatives]
+    if parsed is None:
+        # Preserve the useful work from a truncated or malformed attempt, but
+        # make the recovery itself deterministic and cheap. DeepSeek ignores
+        # reasoning_content in an ordinary next turn, so expose it as text.
+        notes = reasoning
+        if raw:
+            notes += ("\n\nAttempted answer:\n" if notes else "") + raw
+        if not notes:
+            notes = "The previous attempt did not produce usable working notes."
+        retry_messages = messages + [
+            {"role": "assistant",
+             "content": "Incomplete working notes from the previous attempt:\n" + notes},
+            {"role": "user",
+             "content": ("Use those notes only as a draft. Without further deliberation, "
+                         "return the requested final JSON object now.")},
+        ]
+        raw, _, finish_reason, spent = client.chat(
+            retry_messages, INTERP_RETRY_MAX_TOKENS,
+            thinking=False, json_object=True)
+        cost += spent
+        recovery_used = True
+        parsed = parse_interp_output(raw)
+    reasoning_debug = {
+        "reasoning": reasoning,
+        "initial_answer": initial_raw,
+        "initial_finish_reason": initial_finish_reason,
+        "recovery_used": int(recovery_used),
+        "final_answer": raw,
+        "final_finish_reason": finish_reason,
+    }
+    if parsed is None:
+        return {"core_label": "(parse failed)", "core_explanation": "",
+                "broad_label": "", "broad_explanation": "",
+                "tail_coherence": "noise", "relation": "",
+                **empty_scores, "cost_usd": round(cost, 6), "score_details": [],
+                "reasoning_debug": reasoning_debug}
+
+    scores = dict(empty_scores)
+    score_details = []
+    if parsed["core_explanation"] and positives and negatives:
+        items = [(t, float(act), f"q{quartile}") for t, act, quartile in positives]
+        items += [(t, 0.0, "neg") for t in negatives]
         random.Random(feature).shuffle(items)
         texts = [t for t, _, _ in items]
-        raw, spent = client.chat(build_score_messages(explanation, texts),
-                                 len(texts) * 3 + 64, thinking=False)
-        cost += spent
-        preds = parse_score_output(raw, len(texts))
+        preds = []
+        for start in range(0, len(texts), SCORE_CHUNK_SIZE):
+            chunk = texts[start:start + SCORE_CHUNK_SIZE]
+            raw, _, _, spent = client.chat(build_score_messages(
+                                               parsed["core_label"], parsed["core_explanation"],
+                                               parsed["broad_label"], parsed["broad_explanation"], chunk),
+                                           len(chunk) * 8 + 64, thinking=False)
+            cost += spent
+            chunk_preds = parse_score_output(raw, len(chunk))
+            if chunk_preds is None:
+                preds = None
+                break
+            preds.extend(chunk_preds)
         if preds is not None:
-            records = [(l, a, int(p == l)) for p, (_, l, a) in zip(preds, items)]
-            score = round(sum(c for _, _, c in records) / len(records), 3)
-            # balanced accuracy with positives weighted by activation strength:
-            # high when the label fits the strong activators even if the weak tail drifts
-            pos = [(a, c) for l, a, c in records if l == 1]
-            neg = [c for l, _, c in records if l == 0]
-            wsum = sum(a for a, _ in pos)
-            if wsum > 0 and neg:
-                pos_acc = sum(a * c for a, c in pos) / wsum
-                neg_acc = sum(neg) / len(neg)
-                score_weighted = round((pos_acc + neg_acc) / 2, 3)
+            records = [(pred, act, group) for pred, (_, act, group) in zip(preds, items)]
+            for quartile in range(1, 5):
+                q_preds = [pred for pred, _, group in records if group == f"q{quartile}"]
+                if q_preds:
+                    scores[f"score_core_q{quartile}"] = round(
+                        sum(pred == 2 for pred in q_preds) / len(q_preds), 3)
+                    scores[f"score_broad_q{quartile}"] = round(
+                        sum(pred >= 1 for pred in q_preds) / len(q_preds), 3)
+            neg_preds = [pred for pred, _, group in records if group == "neg"]
+            if neg_preds:
+                scores["score_neg_core"] = round(
+                    sum(pred != 2 for pred in neg_preds) / len(neg_preds), 3)
+                scores["score_neg_broad"] = round(
+                    sum(pred == 0 for pred in neg_preds) / len(neg_preds), 3)
+            positive = [(pred, act) for pred, act, group in records if group != "neg"]
+            weight = sum(act for _, act in positive)
+            if weight:
+                scores["score_core"] = round(
+                    sum(act for pred, act in positive if pred == 2) / weight, 3)
+                scores["score_broad"] = round(
+                    sum(act for pred, act in positive if pred >= 1) / weight, 3)
+            decision = {0: "neither", 1: "broad-only", 2: "core"}
+            score_details = [
+                {"text": text, "activation": act, "group": group,
+                 "broad_match": int(pred >= 1), "core_match": int(pred == 2),
+                 "prediction": pred, "decision": decision[pred]}
+                for pred, (text, act, group) in zip(preds, items)
+            ]
 
-    return {"label": label, "type": ftype, "explanation": explanation,
-            "score": score, "score_weighted": score_weighted,
-            "n_pos": len(positives), "n_neg": len(negatives), "cost_usd": round(cost, 6)}
+    return {**parsed, **scores, "cost_usd": round(cost, 6),
+            "score_details": score_details, "reasoning_debug": reasoning_debug}
 
 
 # ---------------------------------------------------------------- main
@@ -417,8 +544,18 @@ def parse_args():
     parser.add_argument("--n-examples", type=int, default=N_EXAMPLES)
     parser.add_argument("--interp-thinking", action="store_true",
                         help="Enable thinking for interpretation (disabled by default)")
+    parser.add_argument("--interp-thinking-max-tokens", type=int,
+                        default=INTERP_THINKING_MAX_TOKENS,
+                        help="Output-token ceiling for thinking interpretation")
     parser.add_argument("--no-score", action="store_true", help="Skip detection scoring")
-    parser.add_argument("--score-per-class", type=int, default=SCORE_PER_CLASS)
+    parser.add_argument("--score-per-quartile", type=int, default=SCORE_PER_QUARTILE,
+                        help="Held-out activating tweets from each rank quartile")
+    parser.add_argument("--score-negatives", type=int, default=SCORE_NEGATIVES,
+                        help="Random exact-zero tweets used as negative controls")
+    parser.add_argument("--score-details-out", type=str, default=None,
+                        help="Optional CSV with every scorer decision for manual auditing")
+    parser.add_argument("--reasoning-out", type=str, default=None,
+                        help="Optional CSV with interpreter reasoning and raw answers for debugging")
     parser.add_argument("--out", type=str, default=None,
                         help="Output CSV (default: interpretation/runs/<run>/interpretations.csv)")
     parser.add_argument("--concurrency", type=int, default=8)
@@ -431,13 +568,25 @@ def parse_args():
 
 def main(args):
     out_path = args.out or os.path.join(artifacts_dir(args.path), "interpretations.csv")
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    if args.score_details_out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.score_details_out)), exist_ok=True)
+        if args.overwrite and os.path.exists(args.score_details_out):
+            os.remove(args.score_details_out)
+    if args.reasoning_out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.reasoning_out)), exist_ok=True)
+        if args.overwrite and os.path.exists(args.reasoning_out):
+            os.remove(args.reasoning_out)
     acts = Activations(args.path)
     features = resolve_features(args, acts)
 
     done = set()
     if os.path.exists(out_path) and not args.overwrite:
         prev = pd.read_csv(out_path)
-        done = set(zip(prev["feature"].astype(int), prev["model"]))
+        valid = prev
+        if "core_label" in prev:
+            valid = prev[prev["core_label"].fillna("") != "(parse failed)"]
+        done = set(zip(valid["feature"].astype(int), valid["model"]))
         print(f"Resuming: {len(done)} (feature, model) rows already in {out_path}")
 
     print("Loading tweets...")
@@ -447,11 +596,6 @@ def main(args):
     handles = tweets_df["twitter"].astype(str).to_numpy()
 
     csv_lock = threading.Lock()
-
-    def append_row(row):
-        with csv_lock:
-            pd.DataFrame([row]).to_csv(out_path, mode="a", index=False,
-                                       header=not os.path.exists(out_path))
 
     todo = [f for f in features if (f, MODEL) not in done]
     if not todo:
@@ -481,7 +625,7 @@ def main(args):
         if not args.no_score:
             positives, negatives = select_score_pool(
                 tweet_rows, act_values, len(texts), texts, ex_norms,
-                args.score_per_class, seed=feature)
+                args.score_per_quartile, args.score_negatives, seed=feature)
         n_act = len(tweet_rows)
         return {"feature": feature, "examples": examples, "n_top": n_top,
                 "positives": positives, "negatives": negatives,
@@ -494,10 +638,33 @@ def main(args):
         try:
             res = interpret_feature(client, j["feature"], j["examples"], j["n_top"],
                                     j["positives"], j["negatives"],
-                                    thinking_interp=args.interp_thinking)
-            append_row({"feature": j["feature"], "model": MODEL, **res,
+                                    thinking_interp=args.interp_thinking,
+                                    thinking_max_tokens=args.interp_thinking_max_tokens)
+            score_details = res.pop("score_details", [])
+            reasoning_debug = res.pop("reasoning_debug", None)
+            main_row = {"feature": j["feature"], "model": MODEL, **res,
                         "n_examples": len(j["examples"]), "n_activating": j["n_act"],
-                        "pct_activating": round(j["pct_act"], 4)})
+                        "pct_activating": round(j["pct_act"], 4)}
+            # Auxiliary records are written first. The compact main row is the
+            # completion checkpoint used by resume, so a completed feature can
+            # never be skipped while its requested debug records are missing.
+            with csv_lock:
+                if args.score_details_out and score_details:
+                    detail_rows = [{"feature": j["feature"], **item}
+                                   for item in score_details]
+                    pd.DataFrame(detail_rows).to_csv(
+                        args.score_details_out, mode="a", index=False,
+                        header=not os.path.exists(args.score_details_out))
+                if args.reasoning_out and reasoning_debug is not None:
+                    reasoning_row = {"feature": j["feature"], "model": MODEL,
+                                     **reasoning_debug,
+                                     "total_feature_cost_usd": res["cost_usd"]}
+                    pd.DataFrame([reasoning_row]).to_csv(
+                        args.reasoning_out, mode="a", index=False,
+                        header=not os.path.exists(args.reasoning_out))
+                pd.DataFrame([main_row]).to_csv(
+                    out_path, mode="a", index=False,
+                    header=not os.path.exists(out_path))
         except Exception as exc:
             print(f"\nfeature {j['feature']} failed: {exc}")
         api_bar.update(1)

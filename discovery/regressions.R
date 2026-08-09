@@ -7,7 +7,7 @@ library(stats)
 setFixest_nthreads(0)
 setFixest_notes(FALSE)
 
-PATH <- "sae/runs/cynical-credit-37"
+PATH <- "sae/runs/chief-dream-73"
 
 # data selection
 START_DATE <- as.Date("2019-01-03") # 116th Congress start
