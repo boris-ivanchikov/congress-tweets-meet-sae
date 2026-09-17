@@ -4,6 +4,10 @@ __pycache__
 /data
 /sae/runs
 /interpretation/runs
+/discovery/runs
+/viewer/data/
+/viewer/backend_data/
+/viewer/node_modules/
 /.venv
 *.aux
 *.log

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Browse SAE activations in congressional tweets.">
+  <title>Congress Tweets Activation Explorer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="site-header">
+      <nav class="workspace-tabs" role="tablist" aria-label="Explorer sections">
+        <button type="button" role="tab" data-panel="activations" aria-selected="true"><strong>Explore activations</strong></button>
+        <button type="button" role="tab" data-panel="tweets" aria-selected="false"><strong>Explore tweets</strong></button>
+        <button type="button" role="tab" data-panel="graph" aria-selected="false"><strong>Activations graph</strong></button>
+      </nav>
+    </header>
+
+    <div class="settings-stack" id="settings-stack">
+      <aside class="display-settings" id="display-settings" aria-label="Display settings">
+        <strong>Display</strong>
+        <label class="display-check" data-setting="tweet-text"><input id="nice-tweet-text" type="checkbox" checked> Nice tweet text</label>
+        <label class="display-check" data-setting="hide-lexical"><input id="hide-lexical" type="checkbox" checked> Hide lexical activations</label>
+        <label class="display-check" data-setting="activation-labels"><input id="broad-activation-labels" type="checkbox" checked> Broad interpretations</label>
+      </aside>
+      <aside class="graph-settings" id="graph-settings" aria-label="Graph view settings" hidden>
+        <strong>Graph view</strong>
+        <label class="graph-select">Co-occurrence<select id="graph-edge-mode"><option value="presence" selected>Presence</option><option value="activation">Activation-weighted</option></select></label>
+        <label class="display-check"><input id="graph-dynamic" type="checkbox"> Dynamic ForceAtlas2 layout</label>
+        <label class="display-check"><input id="graph-linlog" type="checkbox" checked> LinLog attraction</label>
+        <label class="graph-range"><span>Edge contrast <output id="graph-edge-power-value">2.2</output></span><input id="graph-edge-power" type="range" min="0.5" max="3" step="0.1" value="2.2"></label>
+        <label class="graph-range"><span>Attraction <output id="graph-attraction-value">1.0</output></span><input id="graph-attraction" type="range" min="0" max="10" step="0.1" value="1"></label>
+        <label class="graph-range"><span>Repulsion <output id="graph-repulsion-value">0.030</output></span><input id="graph-repulsion" type="range" min="0.005" max="2" step="0.005" value="0.03"></label>
+        <label class="graph-range"><span>Gravity <output id="graph-gravity-value">0.05</output></span><input id="graph-gravity" type="range" min="0" max="2" step="0.05" value="0.05"></label>
+        <label class="graph-range"><span>Community cohesion <output id="graph-community-cohesion-value">0.30</output></span><input id="graph-community-cohesion" type="range" min="0" max="0.8" step="0.01" value="0.3"></label>
+        <label class="graph-range"><span>Weak-edge cutoff <output id="graph-edge-cutoff-value">0.00</output></span><input id="graph-edge-cutoff" type="range" min="0" max="0.8" step="0.05" value="0"></label>
+      </aside>
+    </div>
+
+    <section class="workspace-panel" id="panel-activations" role="tabpanel">
+    <section class="browser-controls" aria-label="Activation navigation">
+      <div class="feature-search">
+        <label class="visually-hidden" for="feature-search">Search activation interpretations</label>
+        <div class="search-input-wrap">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg>
+          <input id="feature-search" type="search" autocomplete="off"
+                 placeholder="Search topics, styles, words, or phrases…"
+                 aria-controls="search-results" aria-expanded="false">
+        </div>
+        <div class="search-results" id="search-results" role="listbox" hidden></div>
+      </div>
+
+      <div class="feature-nav">
+        <label class="visually-hidden" for="feature-input">Activation index</label>
+        <input id="feature-input" name="feature" type="number" min="1" inputmode="numeric" required>
+      </div>
+    </section>
+
+    <div class="status" id="status" role="status">Loading…</div>
+
+    <article id="feature-view" hidden>
+      <section class="interpretation-card" aria-label="Activation interpretations">
+        <div class="interpretation-level">
+          <div class="interpretation-heading">
+            <p class="card-kicker">Core interpretation</p>
+            <span class="accuracy" id="core-accuracy"></span>
+          </div>
+          <h3 id="core-label"></h3>
+          <p class="interpretation-explanation" id="core-explanation"></p>
+        </div>
+        <div class="interpretation-level">
+          <div class="interpretation-heading">
+            <p class="card-kicker">Broad interpretation</p>
+            <span class="accuracy" id="broad-accuracy"></span>
+          </div>
+          <h3 id="broad-label"></h3>
+          <p class="interpretation-explanation" id="broad-explanation"></p>
+        </div>
+        <div class="interpretation-footer">
+          <p class="relation" id="relation" hidden></p>
+          <p class="model-meta" id="model-meta"></p>
+        </div>
+      </section>
+
+      <p class="activation-stat feature-summary-stat" id="activation-stat"></p>
+
+      <section class="examples-section">
+        <div class="section-heading">
+          <div>
+            <h3>Top activating tweets</h3>
+          </div>
+          <p>The ten strongest activations in the corpus.</p>
+        </div>
+        <div class="tweet-grid" id="top-examples"></div>
+      </section>
+
+      <section class="examples-section">
+        <div class="section-heading">
+          <div>
+            <h3>Random activating tweets</h3>
+          </div>
+          <p>A deterministic sample outside the top activations.</p>
+        </div>
+        <div class="tweet-grid" id="random-examples"></div>
+      </section>
+    </article>
+    </section>
+
+    <section class="workspace-panel" id="panel-tweets" role="tabpanel" hidden>
+      <section class="tweet-browser-controls" aria-label="Tweet search">
+        <div class="tweet-search-field">
+          <label class="visually-hidden" for="tweet-search">Search tweets</label>
+          <div class="search-input-wrap">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg>
+            <input id="tweet-search" type="search" autocomplete="off"
+                   placeholder="Search tweet text, hashtag, legislator, or @handle…">
+          </div>
+        </div>
+        <div class="tweet-filter-grid" aria-label="Tweet filters">
+          <label>From year<select id="tweet-year-from"></select></label>
+          <label>To year<select id="tweet-year-to"></select></label>
+          <label>Party<select id="tweet-party"><option value="">All parties</option><option value="D">Democratic</option><option value="R">Republican</option></select></label>
+          <label class="representative-filter">Legislator<input id="tweet-representative" list="tweet-representatives" placeholder="All legislators" autocomplete="off"><datalist id="tweet-representatives"></datalist></label>
+          <button type="button" id="clear-tweet-filters">Clear</button>
+        </div>
+        <div class="activation-filter" aria-label="Activation filters">
+          <label for="tweet-activation-filter">Activations</label>
+          <div class="activation-filter-controls">
+            <input id="tweet-activation-filter" list="tweet-activation-options"
+                   placeholder="Search by index or interpretation…" autocomplete="off">
+            <datalist id="tweet-activation-options"></datalist>
+            <button type="button" id="add-activation-filter">Add</button>
+            <label class="activation-match-label" for="activation-match-mode">Match</label>
+            <select id="activation-match-mode">
+              <option value="all">All selected</option>
+              <option value="any">Any selected</option>
+            </select>
+          </div>
+          <div class="activation-filter-chips" id="activation-filter-chips"></div>
+        </div>
+        <p class="tweet-search-meta" id="tweet-search-meta">Loading searchable tweets…</p>
+      </section>
+
+      <div class="tweet-explorer-status status" id="tweet-explorer-status" role="status">Loading tweet explorer…</div>
+      <section class="tweet-stats" id="tweet-stats" hidden aria-label="Filtered tweet statistics">
+        <div class="stats-carousel">
+          <article class="stats-card">
+            <div class="stats-heading"><h3>Tweet activity</h3><p id="tweet-density-period">Matching tweets over time</p></div>
+            <div class="tweet-density" id="tweet-density"></div>
+          </article>
+          <article class="stats-card">
+            <div class="stats-heading"><h3>Prevailing activations</h3><p>Average activation</p></div>
+            <div class="activation-bars" id="activation-bars"></div>
+          </article>
+          <article class="stats-card">
+            <div class="stats-heading"><h3>Activation trajectory</h3><p id="activation-trend-period">Average activation over time</p></div>
+            <label class="trend-picker-label" for="activation-trend-select">Activation</label>
+            <select class="activation-trend-select" id="activation-trend-select"></select>
+            <div class="activation-trend" id="activation-trend"></div>
+          </article>
+        </div>
+        <p class="stats-note" id="stats-note"></p>
+      </section>
+      <section class="tweet-explorer-layout" id="tweet-explorer-view" hidden>
+        <div class="tweet-results-column">
+          <div class="tweet-results" id="tweet-results"></div>
+        </div>
+        <aside class="tweet-detail" id="tweet-detail">
+          <p class="tweet-detail-placeholder">Search for a tweet, then select it to inspect its strongest activations.</p>
+        </aside>
+      </section>
+    </section>
+    <section class="workspace-panel" id="panel-graph" role="tabpanel" hidden>
+      <section class="graph-toolbar" aria-label="Activation graph controls">
+        <div class="graph-search-field">
+          <label class="visually-hidden" for="graph-search">Find an activation</label>
+          <input id="graph-search" list="graph-search-options"
+                 placeholder="Search by index or interpretation…" autocomplete="off">
+          <datalist id="graph-search-options"></datalist>
+        </div>
+        <button type="button" id="graph-find">Find</button>
+        <p>Scroll to zoom · drag the background to pan · Ctrl/Cmd-click to add nodes · Ctrl/Cmd-drag or Shift-drag for box selection</p>
+      </section>
+      <div class="graph-status status" id="graph-status" role="status">Loading activation graph…</div>
+      <section class="graph-stage" id="graph-stage" hidden>
+        <div class="graph-canvas-pane">
+          <canvas id="activation-graph-canvas" tabindex="0" aria-label="Activation co-occurrence graph"></canvas>
+          <div class="graph-view-controls" aria-label="Graph view controls">
+            <button type="button" id="graph-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+            <button type="button" id="graph-zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+            <button type="button" id="graph-fit" aria-label="Fit graph" title="Fit graph">◎</button>
+            <button type="button" id="graph-fit-selection" aria-label="Fit selection" title="Fit selected activations" disabled>▣</button>
+            <button type="button" id="graph-reset" aria-label="Reset layout" title="Reset layout">↺</button>
+          </div>
+          <div class="graph-tooltip" id="graph-tooltip" hidden></div>
+        </div>
+        <aside class="graph-detail" id="graph-detail">
+          <p class="graph-detail-placeholder">Select one or more activations to inspect their interpretation and co-occurrences.</p>
+        </aside>
+      </section>
+    </section>
+  </main>
+
+  <template id="tweet-template">
+    <article class="tweet-card">
+      <div class="tweet-avatar" aria-hidden="true"></div>
+      <div class="tweet-content">
+        <header class="tweet-header">
+          <div class="identity">
+            <strong class="tweet-name"></strong>
+            <span class="tweet-handle"></span>
+            <span class="separator">·</span>
+            <time class="tweet-date"></time>
+          </div>
+          <span class="activation-badge"></span>
+        </header>
+        <p class="tweet-text"></p>
+      </div>
+    </article>
+  </template>
+
+  <script src="vendor/forceatlas2.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>

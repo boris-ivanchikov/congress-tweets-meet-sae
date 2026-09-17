@@ -101,15 +101,17 @@ if __name__ == "__main__":
         legislators_df["district_old"] = legislators_df["term.state"] + "-" + legislators_df["term.district"]
         legislators_df = legislators_df.drop(["term.state", "term.district"], axis=1)
 
-        # dates: https://en.wikipedia.org/wiki/2020_United_States_redistricting_cycle
+        # dates: https://en.wikipedia.org/wiki/2020_United_States_redistricting_cycle#Final_disposition
+        # NY: https://ballotpedia.org/Redistricting_in_New_York_after_the_2020_census
+        # OH: https://ballotpedia.org/Redistricting_in_Ohio_ahead_of_the_2026_elections
         data = [
             ("CA", "2021-12-27", "2021-12-27"),
             ("TX", "2021-10-25", "2021-10-25"),
             ("FL", "2022-04-22", "2022-04-22"),
-            ("NY", "2022-02-03", "2022-03-31"),   # Overturned on March 31, 2022
+            ("NY", "2022-02-03", "2022-05-20"),   # Overturned on March 31, 2022, new map enacted May 20, 2022
             ("PA", "2022-02-23", "2022-02-23"),
             ("IL", "2021-11-23", "2021-11-23"),
-            ("OH", "2021-11-20", "2022-01-14"),   # Overturned by state Supreme Court on Jan 14, 2022
+            ("OH", "2021-11-20", "2022-03-02"),   # Overturned on Jan 14, 2022, new map enacted March 2, 2022
             ("GA", "2021-12-30", "2021-12-30"),
             ("NC", "2022-02-23", "2022-02-23"),
             ("MI", "2021-12-28", "2021-12-28"),
@@ -135,7 +137,7 @@ if __name__ == "__main__":
             ("UT", "2021-11-12", "2021-11-12"),
             ("IA", "2021-11-04", "2021-11-04"),
             ("NV", "2021-11-16", "2021-11-16"),
-            ("AR", "2021-01-14", "2021-01-14"),
+            ("AR", "2022-01-14", "2022-01-14"), # typo in wikipedia, 2021 -> 2022
             ("MS", "2022-01-25", "2022-01-25"),
             ("KS", "2022-02-09", "2022-02-09"),
             ("NM", "2021-12-17", "2021-12-17"),

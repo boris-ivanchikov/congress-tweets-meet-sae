@@ -4,10 +4,13 @@ library(data.table)
 library(fixest)
 library(progress)
 library(stats)
+library(stringr)
 setFixest_nthreads(0)
 setFixest_notes(FALSE)
 
 PATH <- "sae/runs/chief-dream-73"
+OUTPUT_PATH <- str_replace(PATH, "sae", "discovery")
+dir.create(OUTPUT_PATH, showWarnings = FALSE, recursive = TRUE)
 
 # data selection
 START_DATE <- as.Date("2019-01-03") # 116th Congress start
@@ -30,7 +33,7 @@ dataset <- tweets[representatives, on = "twitter"
 ][, pvi_change_relative := fifelse(party == "R", pvi_change, -pvi_change)
 ][, post := as.numeric(posted_at > maps_finalized)
 ][, posted_ym := format(posted_at, "%Y-%m")
-][, .(tweet_id, posted_ym, bioguide, is_republican, pvi_change_relative, post, party, ran_for_reelection)]
+][, .(tweet_id, posted_ym, bioguide, state, is_republican, pvi_change_relative, post, party, ran_for_reelection)]
 
 # loading sae activations
 ACTIVATIONS_FILE <- file.path(PATH, "activations.h5")
@@ -86,7 +89,8 @@ grouped_dataset <- dataset[, .(
     party = party[1],
     ran_for_reelection = ran_for_reelection[1],
     pvi_change_relative = pvi_change_relative[1],
-    is_republican = is_republican[1]
+    is_republican = is_republican[1],
+    state = state[1]
 ), by = .(bioguide, posted_ym, post)]
 
 grouped_dataset <- cbind(grouped_dataset, as.data.table(as.matrix(grouped_acts)))
@@ -96,7 +100,7 @@ n_keep <- sum(keep)
 result <- data.table(orig_idx = keep_names)
 
 fml <- as.formula(paste0(
-    "c(", paste(keep_names, collapse = ","), ") ~ post + post:pvi_change_relative + post:is_republican | bioguide + posted_ym"
+    "c(", paste(keep_names, collapse = ","), ") ~ post + post:pvi_change_relative + post:is_republican | bioguide + state^posted_ym + party^posted_ym"
 ))
 models <- feols(
     fml, 
@@ -118,4 +122,4 @@ result[, `:=`(
     nobs      = sapply(models, nobs)
 )]
 
-fwrite(result[order(pval)], file.path(PATH, "regressions.csv"))
+fwrite(result[order(pval)], file.path(OUTPUT_PATH, "regressions.csv"))

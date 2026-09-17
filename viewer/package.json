@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "scripts": {
+    "bundle-forceatlas2": "esbuild forceatlas2-runtime.entry.js --bundle --minify --legal-comments=inline --format=iife --platform=browser --outfile=vendor/forceatlas2.js"
+  },
+  "dependencies": {
+    "graphology": "0.26.0",
+    "graphology-communities-louvain": "2.0.2",
+    "graphology-layout-forceatlas2": "0.10.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9"
+  }
+}
