@@ -1,11 +1,12 @@
+import json
 import os
 import tempfile
 import requests
 import pandas as pd
-from nomic import atlas
 import pyreadr
 import zipfile
 from io import BytesIO
+from archive import audit_handles, compile_tweets
 
 if __name__ == "__main__":
 
@@ -15,21 +16,11 @@ if __name__ == "__main__":
     if not os.path.exists("data"):
         os.mkdir("data")
 
-    # Tweets from Members of US Congress from All Time (updated 2024-12-05): https://atlas.nomic.ai/data/hivemind/tweets-from-members-of-us-congress-from-all-time-updated-2024-12-05-3 
+    # https://github.com/alexlitel/congresstweets
 
-    if os.path.exists("data/tweets.csv"):
-        print("data/tweets.csv already exists, skipping.")
-        tweets_df = pd.read_csv("data/tweets.csv")
-    else:
-        dataset = atlas.AtlasDataset(identifier="hivemind/tweets-from-members-of-us-congress-from-all-time-updated-2024-12-05-3")
-        tweets_df = dataset.maps[0].data.df
-        tweets_df = tweets_df.rename({"tweetId": "tweet_id", "postedAt": "posted_at", "twitter_lower": "twitter"}, axis=1)
-        tweets_df["name"] = tweets_df["name"].str.replace(r"([A-Z]-[A-Z][A-Z])", "", regex=True)
-        tweets_df = tweets_df.drop(["state", "party", "chamber", "years", "source", "id"], axis=1)
-        tweets_df = tweets_df[tweets_df["text"] != "null"]
-
-        tweets_df.to_csv("data/tweets.csv", index=False)
-        print(f"Saved data/tweets.csv with {tweets_df.shape[0]} rows, columns: {list(tweets_df.columns)}")
+    with tempfile.TemporaryDirectory(prefix="congress-tweets-") as work_dir:
+        compile_tweets("data", work_dir)
+        audit_handles("data", work_dir)
 
     # Kaslovsky, Jaclyn and Michael R. Kistner 2025: https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/CCVUFY
 
@@ -166,9 +157,11 @@ if __name__ == "__main__":
 
         social_media_df = pd.concat([social_media_df_1[["id.bioguide", "twitter"]], social_media_df_2[["id.bioguide", "twitter"]]]).dropna().drop_duplicates()
 
-        tweets_df = pd.read_csv("data/tweets.csv")
-        social_media_df = social_media_df[social_media_df["twitter"].isin(tweets_df["twitter"])]
         social_media_df = social_media_df.rename({"id.bioguide": "bioguide", "twitter": "twitter"}, axis=1)
+        for chunk in pd.read_csv("data/tweets/raw.csv", usecols=["account_bioguide", "twitter"], dtype=str, chunksize=200000):
+            observed = chunk.dropna().drop_duplicates().rename(columns={"account_bioguide": "bioguide"})
+            social_media_df = pd.concat([social_media_df, observed]).drop_duplicates()
+        social_media_df = social_media_df.groupby("bioguide", as_index=False)["twitter"].agg(lambda handles: json.dumps(sorted(set(handles))))
 
         # join
         final_df = cook_pvi_df \

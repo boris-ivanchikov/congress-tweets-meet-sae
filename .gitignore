@@ -2,6 +2,7 @@ AGENTS.md
 explore.ipynb
 __pycache__
 /data
+/junk
 /sae/runs
 /interpretation/runs
 /discovery/runs
@@ -9,6 +10,7 @@ __pycache__
 /viewer/backend_data/
 /viewer/node_modules/
 /.venv
+/.vscode
 *.aux
 *.log
 *.out
