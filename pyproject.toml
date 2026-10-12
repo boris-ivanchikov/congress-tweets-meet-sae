@@ -27,7 +27,10 @@ dependencies = [
     "torch-tb-profiler",
     "unique-namer",
     "py-spy",
-    "openai"
+    "openai",
+    "httpx[socks]>=0.28.1",
+    "omegaconf>=2.4.0",
+    "hf-xet>=1.5.2",
 ]
 
 [tool.uv]
@@ -42,6 +45,7 @@ packages = ["scripts"]
 
 [project.scripts]
 hfsync = "scripts.hfsync:main"
+hsync = "scripts.hfsync:main"
 
 [[tool.uv.index]]
 name = "pytorch-cu121"

@@ -1,24 +1,7 @@
-import zipfile
+import h5py
 import numpy as np
-from numpy.lib import format as npy_format
 import torch
 import torch.nn as nn
-
-
-def _npz_memmap(path, member):
-    zi = zipfile.ZipFile(path).getinfo(member)
-    with open(path, "rb") as fh:
-        fh.seek(zi.header_offset)
-        head = fh.read(30)
-        fnl = int.from_bytes(head[26:28], "little")
-        efl = int.from_bytes(head[28:30], "little")
-        fh.seek(zi.header_offset + 30 + fnl + efl)
-        version = npy_format.read_magic(fh)
-        readers = {(1, 0): npy_format.read_array_header_1_0, (2, 0): npy_format.read_array_header_2_0}
-        shape, fortran, dtype = readers[version](fh)
-        offset = fh.tell()
-    return np.memmap(path, mode="r", dtype=dtype, offset=offset, shape=shape)
-
 
 class EmbeddingLoader:
     def __init__(
@@ -31,12 +14,11 @@ class EmbeddingLoader:
             world_size=1,
             seed=42,
         ):
-        emb = _npz_memmap(path, "embeddings.npy")
-        ids = _npz_memmap(path, "ids.npy")
-        per = emb.shape[0] // world_size
-        start, end = rank * per, rank * per + per
-        self.ids = torch.from_numpy(np.array(ids[start:end]))
-        self.embeddings = torch.from_numpy(np.array(emb[start:end]))
+        self.path = path
+        with h5py.File(path, "r") as f:
+            per = f["embeddings"].shape[0] // world_size
+            self.start, self.end = rank * per, (rank + 1) * per
+            self.ids = torch.from_numpy(f["ids"][self.start:self.end])
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_partial_batch = drop_partial_batch
@@ -45,6 +27,16 @@ class EmbeddingLoader:
 
     def set_epoch(self, epoch):
         self.epoch = epoch
+
+    def mean(self):
+        with h5py.File(self.path, "r") as f:
+            emb = f["embeddings"]
+            total = np.zeros(emb.shape[1], dtype=np.float64)
+            for start in range(self.start, self.end, 8192):
+                total += emb[start:min(start + 8192, self.end)].sum(axis=0, dtype=np.float64)
+        if self.end == self.start:
+            raise ValueError("Cannot compute the mean of an empty shard")
+        return torch.from_numpy((total / (self.end - self.start)).astype(np.float32))
 
     def __len__(self):
         if self.drop_partial_batch:
@@ -57,9 +49,20 @@ class EmbeddingLoader:
             idx = torch.randperm(self.ids.shape[0], generator=g)
         else:
             idx = torch.arange(self.ids.shape[0])
-        for i in range(len(self)):
-            sl = idx[i * self.batch_size:(i + 1) * self.batch_size]
-            yield self.ids[sl], self.embeddings[sl]
+        with h5py.File(self.path, "r") as f:
+            emb = f["embeddings"]
+            for i in range(len(self)):
+                sl = idx[i * self.batch_size:(i + 1) * self.batch_size]
+                if self.shuffle:
+                    order = np.argsort(sl.numpy())
+                    rows = sl.numpy()[order] + self.start
+                    batch = np.empty((len(sl), emb.shape[1]), dtype=emb.dtype)
+                    for j in range(0, len(rows), 1024):
+                        batch[order[j:j + 1024]] = emb[rows[j:j + 1024]]
+                else:
+                    start = self.start + i * self.batch_size
+                    batch = emb[start:min(start + self.batch_size, self.end)]
+                yield self.ids[sl], torch.from_numpy(batch)
 
 
 class TopKSAE(nn.Module):

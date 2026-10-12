@@ -3,7 +3,7 @@ import random
 import argparse
 from tqdm import tqdm
 from pydantic import BaseModel
-import yaml
+from omegaconf import OmegaConf
 import json
 import torch
 import torch.nn as nn
@@ -13,12 +13,38 @@ from loguru import logger
 from torch.utils.tensorboard import SummaryWriter
 import namer
 from model import EmbeddingLoader, init_sae
+from concurrent.futures import ThreadPoolExecutor
+
+
+EMBEDDINGS_PATH = "data/tweets/embeddings.h5"
 
 
 def normalized_mse(x, x_hat):
     error = x - x_hat
     x_c = x - x.mean(dim=0)
     return (error ** 2).sum() / (x_c ** 2).sum()
+
+
+def pairwise_decoder_cosine_similarity(w_dec):
+    norm_dec = torch.nn.functional.normalize(w_dec, dim=1)
+    dec_sims = torch.mm(norm_dec, norm_dec.T)
+    triu_mask = torch.triu(
+        torch.ones_like(dec_sims),
+        diagonal=1,
+    ).bool()
+    return dec_sims[triu_mask].abs().mean()
+
+
+def prefetch(loader):
+    iterator = iter(loader)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(next, iterator, None)
+        while True:
+            batch = pending.result()
+            if batch is None:
+                break
+            pending = pool.submit(next, iterator, None)
+            yield batch
 
 
 class TrainingConfig(BaseModel):
@@ -78,10 +104,29 @@ class TrainingGraph(nn.Module):
         }
 
 
+    def mean_decoder_cosine(self):
+        decoder_cosine = pairwise_decoder_cosine_similarity(
+            self.model.w_dec.weight.detach().T
+        )
+        return decoder_cosine
+
+
+    def max_decoder_cosine(self):
+        vectors = torch.nn.functional.normalize(self.model.w_dec.weight.detach().T, dim=1)
+        similarities = vectors @ vectors.T
+        similarities.fill_diagonal_(-torch.inf)
+        return similarities.max(dim=1).values.mean()
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True)
-    return parser.parse_args()
+    parser.add_argument('--output', type=str, help='Output directory for this run')
+    parser.add_argument('overrides', nargs='*', help='Config overrides, e.g. model.top_k=32')
+    args = parser.parse_intermixed_args()
+    if any('=' not in item for item in args.overrides):
+        parser.error('Overrides must use key=value syntax')
+    return args
 
 
 def main(args):
@@ -94,13 +139,24 @@ def main(args):
         local_rank = int(os.environ["LOCAL_RANK"])
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
+        if local_rank == 0:
+            logger.info(f"Running distributed, world_size={world_size}")
     else:
         rank, world_size, local_rank = 0, 1, 0
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        logger.info(f"Running on {str(device)}")
+        
     is_main = rank == 0
 
-    with open(args.config, "r") as f:
-        data = yaml.safe_load(f)
+    cfg = OmegaConf.load(args.config)
+    OmegaConf.set_struct(cfg, True)
+    cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+    data = OmegaConf.to_container(cfg, resolve=True)
     config = TrainingConfig(**data["training"])
 
     if is_main:
@@ -110,25 +166,28 @@ def main(args):
     graph = TrainingGraph(model, config).to(device)
     ddp = DDP(graph, device_ids=[local_rank]) if distributed else graph
 
-    name = None
-    writer = None
-    if is_main:
-        name = namer.generate() + "-" + str(random.randint(10, 99))
-        logger.info(f"Starting run {name}")
-        writer = SummaryWriter(f"sae/runs/{name}")
-
     batch_size_per_gpu = config.batch_size // world_size     
     loader = EmbeddingLoader(
-        path="data/embeddings.npz", 
+        path=EMBEDDINGS_PATH, 
         batch_size=batch_size_per_gpu,
         shuffle=True, rank=rank, 
         world_size=world_size
     )
+
+    name = None
+    writer = None
+    if is_main:
+        output = args.output
+        if output is None:
+            name = namer.generate() + "-" + str(random.randint(10, 99))
+            output = f"sae/runs/{name}"
+        logger.info(f"Starting run in {output}")
+        writer = SummaryWriter(output)
     
     if is_main:
         logger.info(f"Using {world_size} GPUs, batch size {batch_size_per_gpu} per GPU.")
 
-    mean = loader.embeddings.float().mean(dim=0).to(device)
+    mean = loader.mean().to(device)
     if distributed:
         dist.all_reduce(mean)
         mean /= world_size
@@ -141,7 +200,7 @@ def main(args):
         loader.set_epoch(epoch)
         if is_main:
             pbar.set_description(f"Epoch {epoch+1}/{config.epochs}")
-        for i, (ids, x) in enumerate(loader):
+        for i, (ids, x) in enumerate(prefetch(loader)):
             outputs = ddp(x.to(device))
             loss = outputs["loss"]
             loss.backward()
@@ -156,17 +215,26 @@ def main(args):
                 writer.add_scalar("reconstruction_loss", outputs["reconstruction_loss"], global_step=global_step)
                 writer.add_scalar("aux_loss", outputs["aux_loss"], global_step=global_step)
                 writer.add_scalar("num_dead", outputs["num_dead"], global_step=global_step)
+
+                if i % 50 == 0:
+                    decoder_cosine = graph.mean_decoder_cosine()
+                    writer.add_scalar("decoder_cosine", decoder_cosine, global_step=global_step)
+                    writer.add_scalar("max_decoder_cosine", graph.max_decoder_cosine(), global_step=global_step)
+
                 pbar.update(1)
 
     if is_main:
-        torch.save(graph.model.state_dict(), f"sae/runs/{name}/weights.pt")
-        with open(f"sae/runs/{name}/config.json", "w") as f:
+        torch.save(graph.model.state_dict(), os.path.join(output, "weights.pt"))
+        with open(os.path.join(output, "config.json"), "w") as f:
             json.dump(data, f, indent=4)
+        writer.close()
 
 
 if __name__ == "__main__":
     args = parse_args()
     args.config = os.path.abspath(args.config)
+    if args.output is not None:
+        args.output = os.path.abspath(os.path.expanduser(args.output))
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
