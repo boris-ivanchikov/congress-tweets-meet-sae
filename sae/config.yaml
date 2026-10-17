@@ -1,13 +1,11 @@
 model:
-  type: MatryoshkaSAE
   input_dim: 4096
   expansion_factor: 2
   top_k: 64
-  prefixes: [256, 768, 1792, 3840, 8192]
 training:
   epochs: 1
   batch_size: 1024
   lr: 3e-4
   dead_num_iters: 500
-  aux_top_k: 256
   aux_loss_weight: 0.03125
+  matryoska_prefixes: [256, 768, 1792, 3840, 8192]

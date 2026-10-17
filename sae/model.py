@@ -65,13 +65,14 @@ class EmbeddingLoader:
                 yield self.ids[sl], torch.from_numpy(batch)
 
 
-class TopKSAE(nn.Module):
+class BatchTopKSAE(nn.Module):
     def __init__(self, input_dim: int, expansion_factor: int, top_k: int):
         super().__init__()
         self.input_dim = input_dim
         self.expansion_factor = expansion_factor
         self.dict_size = input_dim * expansion_factor
         self.top_k = top_k
+        self.register_buffer("threshold", torch.zeros(1))
 
         self.w_enc = nn.Linear(input_dim, input_dim * expansion_factor, bias=False)
         self.w_dec = nn.Linear(input_dim * expansion_factor, input_dim, bias=False)
@@ -84,16 +85,23 @@ class TopKSAE(nn.Module):
     def encode(self, x):
         return self.w_enc(x - self.b_pre) + self.b_enc
     
-    def topk(self, z):
-        _, idx = z.topk(self.top_k, dim=1)
-        z_topk = torch.zeros_like(z).scatter_(1, idx, z.gather(1, idx))
-        return z_topk
+    def apply_activation(self, z):
+        if self.training:
+            values, idx = z.flatten().topk(self.top_k * z.shape[0], dim=0)
+            z_sparse = torch.zeros_like(z.flatten()) \
+                .scatter_(0, idx, z.flatten().gather(0, idx)) \
+                .reshape(z.shape)
+            self.threshold = self.threshold.detach() * 0.9 + values.min().item() * 0.1
+        else:
+            z_sparse = z * (z > self.threshold)
+
+        return z_sparse
     
-    def decode(self, z):
-        return self.w_dec(z) + self.b_pre
+    def decode(self, z_sparse):
+        return self.w_dec(z_sparse) + self.b_pre
     
     def forward(self, x):
-        return self.topk(self.encode(x))
+        return self.apply_activation(self.encode(x))
     
     @torch.no_grad()
     def project_decoder_grads(self):
@@ -105,54 +113,4 @@ class TopKSAE(nn.Module):
     def normalize_decoder_weights(self):
         w = self.w_dec.weight
         w.data /= w.data.norm(dim=0, keepdim=True)
-        
-        
-class BatchTopKSAE(TopKSAE):
-    def __init__(self, input_dim: int, expansion_factor: int, top_k: int):
-        super().__init__(input_dim, expansion_factor, top_k)
-        self.register_buffer("threshold", torch.zeros(1))
-    
-    def topk(self, z):
-        values, idx = z.flatten().topk(self.top_k * z.shape[0], dim=0)
-        z_topk = torch.zeros_like(z.flatten()) \
-            .scatter_(0, idx, z.flatten().gather(0, idx)) \
-            .reshape(z.shape)
-        self.threshold = self.threshold.detach() * 0.9 + values.min().item() * 0.1
-        return z_topk
 
-    def forward(self, x):
-        z = self.encode(x)
-        z[z < self.threshold] = 0.0
-        return z
-
-
-class MatryoshkaSAE(BatchTopKSAE):
-    def __init__(
-            self, 
-            input_dim: int, 
-            expansion_factor: int,
-            top_k: int, 
-            prefixes: list[int]
-        ):
-        super().__init__(input_dim, expansion_factor, top_k)
-        self.prefixes = sorted(prefixes)
-        if self.dict_size not in self.prefixes:
-            raise ValueError(f"Dict size ({self.dict_size}) is required in prefixes")
-    
-    def decode(self, z):
-        return torch.stack([
-            z[:, :prefix] @ self.w_dec.weight.T[:prefix] + self.b_pre
-            for prefix in self.prefixes
-        ], dim=1)
-
-
-SAE_REGISTRY = {
-    "TopKSAE": TopKSAE,
-    "BatchTopKSAE": BatchTopKSAE,
-    "MatryoshkaSAE": MatryoshkaSAE,
-}
-
-
-def init_sae(cfg: dict) -> TopKSAE:
-    cls = SAE_REGISTRY[cfg["type"]]
-    return cls(**{k: v for k, v in cfg.items() if k != "type"})

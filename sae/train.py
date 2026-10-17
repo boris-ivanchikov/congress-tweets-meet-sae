@@ -12,7 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from loguru import logger
 from torch.utils.tensorboard import SummaryWriter
 import namer
-from model import EmbeddingLoader, init_sae
+from model import EmbeddingLoader, BatchTopKSAE
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -52,66 +52,76 @@ class TrainingConfig(BaseModel):
     batch_size: int
     lr: float
     dead_num_iters: int
-    aux_top_k: int
-    aux_loss_weight: float
+    aux_loss_weight: float = 0.03125
+    matryoska_prefixes: list[int] | None = None
 
 
 class TrainingGraph(nn.Module):
     def __init__(self, model, config):
         super().__init__()
         self.config = config
+
         self.model = model
         self.register_buffer('dead_counter', torch.zeros(model.dict_size))
     
     def forward(self, x):
         z = self.model.encode(x)
-        z_topk = self.model.topk(z)
-        x_hat = self.model.decode(z_topk)
-        if x_hat.dim() == 2:
+        z_sparse = self.model.apply_activation(z)
+        
+        # reconstruction loss (+ matryoska)
+        prefixes = self.config.matryoska_prefixes
+        if prefixes is None:
+            x_hat = self.model.decode(z_sparse)
             reconstruction_loss = normalized_mse(x, x_hat)
-            reconstruction_loss_last = reconstruction_loss
-        elif x_hat.dim() == 3: # matryoshka
-            n = x_hat.shape[1]
-            reconstruction_loss = sum(normalized_mse(x, x_hat[:, i, :]) for i in range(n)) / n
-            reconstruction_loss_last = normalized_mse(x, x_hat[:, -1, :])
+        else:
+            reconstruction_losses = []
+            for prefix in prefixes:
+                x_hat = (
+                    z_sparse[:, :prefix]
+                    @ self.model.w_dec.weight[:, :prefix].T
+                    + self.model.b_pre
+                )
+                reconstruction_losses.append(normalized_mse(x, x_hat))
+            reconstruction_loss = torch.stack(reconstruction_losses).mean()
 
         self.dead_counter += 1
-        fired = (z_topk > 0).any(dim=0).float()
+        fired = (z_sparse > 0).any(dim=0).float()
         if dist.is_available() and dist.is_initialized():
             dist.all_reduce(fired, op=dist.ReduceOp.MAX)
         self.dead_counter[fired > 0] = 0
         dead_mask = self.dead_counter > self.config.dead_num_iters
-
+        
+        aux_loss = x.new_zeros(())
         if self.config.aux_loss_weight > 0 and dead_mask.any():
-            error = (x - x_hat) if x_hat.dim() == 2 else (x - x_hat[:, -1, :])
+            error = x - x_hat
             num_dead = dead_mask.sum().item()
-            _, idx = z[:, dead_mask].topk(min(self.config.aux_top_k, num_dead), dim=1)
+            k_aux = self.model.input_dim // 2
+            scale = min(num_dead / k_aux, 1.0)
+            _, idx = z[:, dead_mask].topk(min(k_aux, num_dead), dim=1)
             dead_vals = z[:, dead_mask].gather(1, idx)
             dead_decoder = self.model.w_dec.weight[:, dead_mask].T
             z_dead_sparse = dead_vals.new_zeros(x.shape[0], num_dead).scatter(1, idx, dead_vals)
             reconstructed_error = z_dead_sparse @ dead_decoder
-            aux_loss = normalized_mse(error.detach(), reconstructed_error)
-        else:
-            aux_loss = torch.tensor(0.0, device=x.device)
+            aux_loss = scale * normalized_mse(error.detach(), reconstructed_error)
 
         loss = reconstruction_loss + self.config.aux_loss_weight * aux_loss
 
         return {
             "loss": loss,
-            "reconstruction_loss": reconstruction_loss_last,
+            "reconstruction_loss": reconstruction_loss,
             "aux_loss": aux_loss,
             "num_dead": dead_mask.sum().item(),
         }
 
 
-    def mean_decoder_cosine(self):
+    def mean_abs_decoder_cosine(self):
         decoder_cosine = pairwise_decoder_cosine_similarity(
             self.model.w_dec.weight.detach().T
         )
         return decoder_cosine
 
 
-    def max_decoder_cosine(self):
+    def mean_max_decoder_cosine(self):
         vectors = torch.nn.functional.normalize(self.model.w_dec.weight.detach().T, dim=1)
         similarities = vectors @ vectors.T
         similarities.fill_diagonal_(-torch.inf)
@@ -162,7 +172,7 @@ def main(args):
     if is_main:
         logger.info("Creating graph...")
 
-    model = init_sae(data["model"])
+    model = BatchTopKSAE(**data["model"])
     graph = TrainingGraph(model, config).to(device)
     ddp = DDP(graph, device_ids=[local_rank]) if distributed else graph
 
@@ -193,7 +203,9 @@ def main(args):
         mean /= world_size
     graph.model.b_pre.data = mean
 
-    optimizer = torch.optim.Adam(graph.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(
+        graph.parameters(), lr=config.lr
+    )
 
     pbar = tqdm(total=config.epochs * len(loader)) if is_main else None
     for epoch in range(config.epochs):
@@ -201,6 +213,7 @@ def main(args):
         if is_main:
             pbar.set_description(f"Epoch {epoch+1}/{config.epochs}")
         for i, (ids, x) in enumerate(prefetch(loader)):
+            global_step = epoch * len(loader) + i
             outputs = ddp(x.to(device))
             loss = outputs["loss"]
             loss.backward()
@@ -210,16 +223,22 @@ def main(args):
             optimizer.zero_grad()
 
             if is_main:
-                global_step = epoch * len(loader) + i
                 writer.add_scalar("loss", loss, global_step=global_step)
                 writer.add_scalar("reconstruction_loss", outputs["reconstruction_loss"], global_step=global_step)
                 writer.add_scalar("aux_loss", outputs["aux_loss"], global_step=global_step)
                 writer.add_scalar("num_dead", outputs["num_dead"], global_step=global_step)
 
+
                 if i % 50 == 0:
-                    decoder_cosine = graph.mean_decoder_cosine()
-                    writer.add_scalar("decoder_cosine", decoder_cosine, global_step=global_step)
-                    writer.add_scalar("max_decoder_cosine", graph.max_decoder_cosine(), global_step=global_step)
+                    if hasattr(graph.model, "threshold"):
+                        writer.add_scalar(
+                            "mean_threshold",
+                            graph.model.threshold.detach().mean(),
+                            global_step=global_step,
+                        )
+                    decoder_cosine = graph.mean_abs_decoder_cosine()
+                    writer.add_scalar("mean_abs_decoder_cosine", decoder_cosine, global_step=global_step)
+                    writer.add_scalar("mean_max_decoder_cosine", graph.mean_max_decoder_cosine(), global_step=global_step)
 
                 pbar.update(1)
 

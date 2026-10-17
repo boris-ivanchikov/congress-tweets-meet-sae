@@ -3,7 +3,7 @@ import json
 import argparse
 import torch
 from tqdm import tqdm
-from model import EmbeddingLoader, init_sae
+from model import EmbeddingLoader, BatchTopKSAE
 from loguru import logger
 import numpy as np
 import scipy
@@ -33,8 +33,9 @@ def main(args):
     output_path = os.path.join(args.path, "activations.h5")
     with open(config_path, "r") as f:
         config = json.load(f)
-    model = init_sae(config["model"]).to(device)
+    model = BatchTopKSAE(**{k: v for k, v in config["model"].items() if k != "type"}).to(device)
     model.load_state_dict(torch.load(weights_path, weights_only=False))
+    model.eval()
 
     ids_list = []
     rows = []
