@@ -3,17 +3,20 @@ import json
 import argparse
 import torch
 from tqdm import tqdm
-from model import EmbeddingLoader, BatchTopKSAE
+from model import prefetch, EmbeddingLoader, BatchTopKSAE
 from loguru import logger
 import numpy as np
 import scipy
 import h5py
 
 
+EMBEDDINGS_PATH = "data/tweets/embeddings.h5"
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', type=str, required=True)
-    parser.add_argument('--batch-size', type=int, default=32768)
+    parser.add_argument('--batch', type=int, default=4096)
     return parser.parse_args()
 
 
@@ -22,10 +25,16 @@ def main(args):
     if not os.path.exists(args.path):
         raise FileNotFoundError(f"Path {args.path} does not exist")
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    logger.info(f"Running on {str(device)}")
 
     logger.info("Creating loader...")
-    loader = EmbeddingLoader(path="data/embeddings.npz", batch_size=args.batch_size, shuffle=False, drop_partial_batch=False)
+    loader = EmbeddingLoader(path=EMBEDDINGS_PATH, batch_size=args.batch, shuffle=False, drop_partial_batch=False)
 
     logger.info(f"Loading model from {args.path}...")
     config_path = os.path.join(args.path, "config.json")
@@ -34,7 +43,7 @@ def main(args):
     with open(config_path, "r") as f:
         config = json.load(f)
     model = BatchTopKSAE(**{k: v for k, v in config["model"].items() if k != "type"}).to(device)
-    model.load_state_dict(torch.load(weights_path, weights_only=False))
+    model.load_state_dict(torch.load(weights_path, weights_only=False, map_location=device))
     model.eval()
 
     ids_list = []
@@ -43,7 +52,7 @@ def main(args):
     vals = []
     pbar = tqdm(total=len(loader))
     pbar.set_description("Inference")
-    for i, (ids, x) in enumerate(loader):
+    for i, (ids, x) in enumerate(prefetch(loader)):
         ids_list.append(ids.cpu().numpy())
         z = model(x.to(device))
         nz_rows, nz_cols = torch.nonzero(z, as_tuple=True)
@@ -51,7 +60,7 @@ def main(args):
         nz_cols = nz_cols.cpu().float().numpy()
         nz_vals = z[nz_rows, nz_cols].cpu().float().numpy()
 
-        rows.append(nz_rows + i * args.batch_size)
+        rows.append(nz_rows + i * args.batch)
         cols.append(nz_cols)
         vals.append(nz_vals)
         pbar.update(1)

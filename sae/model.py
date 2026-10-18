@@ -2,6 +2,20 @@ import h5py
 import numpy as np
 import torch
 import torch.nn as nn
+from concurrent.futures import ThreadPoolExecutor
+
+
+def prefetch(loader):
+    iterator = iter(loader)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(next, iterator, None)
+        while True:
+            batch = pending.result()
+            if batch is None:
+                break
+            pending = pool.submit(next, iterator, None)
+            yield batch
+
 
 class EmbeddingLoader:
     def __init__(

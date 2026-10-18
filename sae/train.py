@@ -12,8 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from loguru import logger
 from torch.utils.tensorboard import SummaryWriter
 import namer
-from model import EmbeddingLoader, BatchTopKSAE
-from concurrent.futures import ThreadPoolExecutor
+from model import prefetch, EmbeddingLoader, BatchTopKSAE
 
 
 EMBEDDINGS_PATH = "data/tweets/embeddings.h5"
@@ -33,18 +32,6 @@ def pairwise_decoder_cosine_similarity(w_dec):
         diagonal=1,
     ).bool()
     return dec_sims[triu_mask].abs().mean()
-
-
-def prefetch(loader):
-    iterator = iter(loader)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        pending = pool.submit(next, iterator, None)
-        while True:
-            batch = pending.result()
-            if batch is None:
-                break
-            pending = pool.submit(next, iterator, None)
-            yield batch
 
 
 class TrainingConfig(BaseModel):
