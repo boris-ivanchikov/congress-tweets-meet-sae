@@ -13,12 +13,22 @@ class EmbeddingLoader:
             rank=0,
             world_size=1,
             seed=42,
+            load_into_ram=False,
         ):
         self.path = path
         with h5py.File(path, "r") as f:
             per = f["embeddings"].shape[0] // world_size
             self.start, self.end = rank * per, (rank + 1) * per
             self.ids = torch.from_numpy(f["ids"][self.start:self.end])
+            shape = f["embeddings"].shape
+            dtype = f["embeddings"].dtype
+            self.embeddings = None
+            if load_into_ram:
+                self.embeddings = np.empty((self.end - self.start, shape[1]), dtype=dtype)
+                if self.end > self.start:
+                    f["embeddings"].read_direct(
+                        self.embeddings, source_sel=np.s_[self.start:self.end, :],
+                    )
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_partial_batch = drop_partial_batch
@@ -30,10 +40,11 @@ class EmbeddingLoader:
 
     def mean(self):
         with h5py.File(self.path, "r") as f:
-            emb = f["embeddings"]
+            emb = self.embeddings if self.embeddings is not None else f["embeddings"]
             total = np.zeros(emb.shape[1], dtype=np.float64)
-            for start in range(self.start, self.end, 8192):
-                total += emb[start:min(start + 8192, self.end)].sum(axis=0, dtype=np.float64)
+            begin, end = (0, len(emb)) if self.embeddings is not None else (self.start, self.end)
+            for start in range(begin, end, 8192):
+                total += emb[start:min(start + 8192, end)].sum(axis=0, dtype=np.float64)
         if self.end == self.start:
             raise ValueError("Cannot compute the mean of an empty shard")
         return torch.from_numpy((total / (self.end - self.start)).astype(np.float32))
@@ -49,6 +60,12 @@ class EmbeddingLoader:
             idx = torch.randperm(self.ids.shape[0], generator=g)
         else:
             idx = torch.arange(self.ids.shape[0])
+        if self.embeddings is not None:
+            for i in range(len(self)):
+                sl = idx[i * self.batch_size:(i + 1) * self.batch_size]
+                batch = self.embeddings[sl.numpy()]
+                yield self.ids[sl], torch.from_numpy(batch)
+            return
         with h5py.File(self.path, "r") as f:
             emb = f["embeddings"]
             for i in range(len(self)):

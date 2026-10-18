@@ -73,6 +73,7 @@ class TrainingGraph(nn.Module):
         if prefixes is None:
             x_hat = self.model.decode(z_sparse)
             reconstruction_loss = normalized_mse(x, x_hat)
+            reconstruction_objective = reconstruction_loss
         else:
             reconstruction_losses = []
             for prefix in prefixes:
@@ -82,7 +83,8 @@ class TrainingGraph(nn.Module):
                     + self.model.b_pre
                 )
                 reconstruction_losses.append(normalized_mse(x, x_hat))
-            reconstruction_loss = torch.stack(reconstruction_losses).mean()
+            reconstruction_objective = torch.stack(reconstruction_losses).mean()
+            reconstruction_loss = reconstruction_losses[-1]
 
         self.dead_counter += 1
         fired = (z_sparse > 0).any(dim=0).float()
@@ -104,7 +106,7 @@ class TrainingGraph(nn.Module):
             reconstructed_error = z_dead_sparse @ dead_decoder
             aux_loss = scale * normalized_mse(error.detach(), reconstructed_error)
 
-        loss = reconstruction_loss + self.config.aux_loss_weight * aux_loss
+        loss = reconstruction_objective + self.config.aux_loss_weight * aux_loss
 
         return {
             "loss": loss,
@@ -132,6 +134,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True)
     parser.add_argument('--output', type=str, help='Output directory for this run')
+    parser.add_argument('--embeddings-in-ram', action='store_true', help='Load embeddings into RAM once before training')
     parser.add_argument('overrides', nargs='*', help='Config overrides, e.g. model.top_k=32')
     args = parser.parse_intermixed_args()
     if any('=' not in item for item in args.overrides):
@@ -181,7 +184,8 @@ def main(args):
         path=EMBEDDINGS_PATH, 
         batch_size=batch_size_per_gpu,
         shuffle=True, rank=rank, 
-        world_size=world_size
+        world_size=world_size,
+        load_into_ram=args.embeddings_in_ram,
     )
 
     name = None
@@ -214,7 +218,7 @@ def main(args):
             pbar.set_description(f"Epoch {epoch+1}/{config.epochs}")
         for i, (ids, x) in enumerate(prefetch(loader)):
             global_step = epoch * len(loader) + i
-            outputs = ddp(x.to(device))
+            outputs = ddp(x.to(device=device, dtype=torch.float32))
             loss = outputs["loss"]
             loss.backward()
             graph.model.project_decoder_grads()
